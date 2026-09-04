@@ -1,0 +1,37 @@
+# Visual Studio
+.vs/
+*.VC.db
+*.VC.opendb
+*.pdb
+*.ilk
+*.exe
+*.lib
+*.obj
+.vs/
+out/
+build/
+
+# Build folders
+build/
+out/
+bin/
+Debug/
+Release/
+x64/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+Makefile
+
+# Generated binaries
+*.exe
+*.dll
+*.lib
+*.obj
+*.pdb
+
+# Vulkan shader binaries
+*.spv
