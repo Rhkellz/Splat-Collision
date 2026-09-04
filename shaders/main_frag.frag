@@ -23,7 +23,7 @@ void main() {
     }
 
     float alpha = min(0.99, splat_opacity * exp(power));
-    if (alpha < 0.001) {
+    if (alpha < PushConstants.min_opacity) {
         discard;
     }
 

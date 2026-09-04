@@ -180,7 +180,7 @@ void PipelineBuilder::set_multisampling_none()
 
 void PipelineBuilder::set_multisampling_MSAA() {
     _multisampling.sampleShadingEnable = VK_FALSE;
-    _multisampling.rasterizationSamples = VK_SAMPLE_COUNT_4_BIT;
+    _multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;// temp
     _multisampling.minSampleShading = 1.0f;
     _multisampling.pSampleMask = nullptr;
     // no alpha to coverage either

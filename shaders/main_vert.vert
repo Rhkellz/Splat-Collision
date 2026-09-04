@@ -42,7 +42,6 @@ vec3 SH_to_RGB(vec3 direction, int i) {
 }
 
 mat3 reconstruct_cov(float scale[3], float rot[4]) {
-    // Exponentiate log-space scales on GPU
     vec3 sigma = vec3(scale[0], scale[1], scale[2]);
     
     mat3 r = quat_to_mat3(rot);
@@ -81,7 +80,7 @@ void main()
     vec4 clip_pos = scene_data.proj_matrix * scene_data.view_matrix * vec4(splat_world_pos, 1.0f);
     vec4 view_pos = scene_data.view_matrix * vec4(splat_world_pos, 1.0f);
 
-    if (clip_pos.w <= 0.0 || view_pos.z >= -0.001 || scene_data.screen_size.x <= 0.0 || scene_data.screen_size.y <= 0.0) {
+    if (clip_pos.w <= 0.0 || view_pos.z >= -0.02 || scene_data.screen_size.x <= 0.0 || scene_data.screen_size.y <= 0.0) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         splat_coord = quad_corners[gl_VertexIndex];
         out_color = vec3(0.0);

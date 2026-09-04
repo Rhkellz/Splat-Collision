@@ -17,21 +17,6 @@
 
 constexpr unsigned int FRAME_OVERLAP = 2;
 
-struct ComputePushConstants {
-	glm::vec4 data1;
-	glm::vec4 data2;
-	glm::vec4 data3;
-	glm::vec4 data4;
-};
-
-struct ComputeEffect {
-	const char* name;
-
-	VkPipeline pipeline;
-	VkPipelineLayout layout;
-
-	ComputePushConstants data;
-};
 
 struct FrameData {
 	VkSemaphore _swapchain_semaphore;
@@ -81,7 +66,6 @@ public:
 
 	AllocatedImage _draw_image;
 	AllocatedImage _depth_image;
-	AllocatedImage _resolve_image;
 	VkExtent2D _draw_extent;
 
 	float screen_width = 0.0;
@@ -117,9 +101,6 @@ public:
 
 	VkClearColorValue clear_color;
 
-	float rotation_angle = 0.0f;
-	float point_size = 5.0;
-
 	float rad = 0.23f;
 	float phi = 1.45f;
 	float theta = 0.0f;
@@ -134,11 +115,14 @@ public:
 	std::chrono::steady_clock::time_point curr_time;
 	int frame_time = 0;
 
+	float min_opacity = 0.001;
+
 	VertexMeshBuffer splat_vertices;
 
 	VkDescriptorSet splat_set;
 
 	Scene scene;
+
 
 private:
 

@@ -37,9 +37,9 @@ layout(buffer_reference, std430) readonly buffer Vertex_buffer{
 layout( push_constant ) uniform constants
 {	
     Vertex_buffer vertex_buffer;
-	float point_size;
 	float focal_x;
 	float focal_y;
+    float min_opacity;
 } PushConstants;
 
 // SH constants
