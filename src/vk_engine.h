@@ -75,11 +75,6 @@ public:
 
 	DescriptorAllocator global_descriptor_allocator;
 
-	VkDescriptorSet _draw_image_descriptors_allocator;
-	VkDescriptorSetLayout _draw_image_descriptor_layout;
-
-	VkDescriptorSetLayout _splat_data_descriptor_layout;
-
 
 	VkPipeline _compute_pipeline;
 	VkPipelineLayout _compute_pipeline_layout;
@@ -96,6 +91,7 @@ public:
 
 	GPUSceneData scene_data;
 
+	VkDescriptorSetLayout _splat_data_descriptor_layout;
 	VkDescriptorSetLayout _gpu_scene_data_descriptor_layout;
 	VkDescriptorSetLayout _splat_indicies_descriptor_layout;
 
@@ -116,8 +112,8 @@ public:
 	int frame_time = 0;
 
 	float min_opacity = 0.001;
-
-	VertexMeshBuffer splat_vertices;
+	float scroll_sensitivity = 0.02;
+	float clipping_plane = 0.05;
 
 	VkDescriptorSet splat_set;
 
@@ -152,4 +148,6 @@ private:
 	void init_splats();
 
 	void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
+
+	void resize_draw_images();
 };

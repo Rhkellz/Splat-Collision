@@ -21,22 +21,8 @@ struct Splat {
 layout(set = 2, binding = 0) readonly buffer splat_buffer_t { Splat splats[]; } splat_buffer;
 layout(set = 1, binding = 0) readonly buffer sorted_indices_t { uint indices[]; } sorted_indices;
 
-struct Vertex {
-	vec3 position;
-	float uv_x;
-	vec3 normal;
-	float uv_y;
-	vec4 color;
-}; 
-
-
-layout(buffer_reference, std430) readonly buffer Vertex_buffer{ 
-	Vertex vertices[];
-};
-
 layout( push_constant ) uniform constants
 {	
-    Vertex_buffer vertex_buffer;
 	float focal_x;
 	float focal_y;
     float min_opacity;

@@ -103,7 +103,6 @@ struct VertexMeshBuffer {
 
 // push constants for our mesh object draws
 struct GPUDrawPushConstants {
-	VkDeviceAddress vertex_buffer;
 	float focal_x;
 	float focal_y;
 	float min_opacty;

@@ -160,11 +160,6 @@ void VulkanEngine::init_images() {
 
 	_depth_image = vkutil::create_image(_context, draw_image_extent, depth_image_format, depth_image_flags, false, VK_SAMPLE_COUNT_1_BIT);
 
-	// add to deletion queues
-	_main_deletion_queue.push_function([=]() {
-		vkutil::destroy_image(_context, _draw_image);
-		vkutil::destroy_image(_context, _depth_image);
-		});
 }
 
 void VulkanEngine::init_commands() {
@@ -237,6 +232,9 @@ void VulkanEngine::init_descriptors()
 	};
 
 	global_descriptor_allocator.init_pool(_context.device, 10, sizes);
+	_main_deletion_queue.push_function([=]() {
+		global_descriptor_allocator.destroy_pool(_context.device);
+		});
 
 
 
@@ -367,27 +365,11 @@ void VulkanEngine::init_default_data() {
 	clear_color = { {0.1, 0.1, 0.1, 1.0} };
 }
 
-void VulkanEngine::init_splats() {// refactor sometime
+void VulkanEngine::init_splats() {
 
-	std::cout << SH_FLOAT_COUNT << std::endl;
-
-	std::vector<Vertex> centroids;
-	scene = loadPly("assets/tomatoes.ply");
-	centroids.reserve(scene.splats.size());
-	for (auto& splat : scene.splats) {
-		Vertex v;
-		v.position = splat.centroid;// temp to make it bigger
-		v.color = glm::vec4(1, 1, 1, 1);
-		centroids.push_back(v);
-	}
-
-	splat_vertices = upload_mesh(_context, centroids);
-	splat_vertices.vert_amt = centroids.size();
+	scene = loadPly("assets/cloud.ply");
+	std::cout << scene.splats.size() << " total splats" << std::endl;
 	
-	_main_deletion_queue.push_function([=]() {
-		vkutil::destroy_buffer(_context, splat_vertices.vertexBuffer);
-		});
-
 	AllocatedBuffer splat_buffer = vkutil::create_buffer(_context, sizeof(gaussian_splat) * scene.splats.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 
 	_main_deletion_queue.push_function([=]() {
@@ -445,7 +427,7 @@ void VulkanEngine::run()
 				if (e.type == SDL_MOUSEWHEEL) {
 					float scroll = e.wheel.y;
 
-					rad += scroll * 0.02f;
+					rad -= scroll * scroll_sensitivity;
 
 					if (rad < 0.0001f) {
 						rad = 0.0001f;
@@ -502,6 +484,7 @@ void VulkanEngine::run()
 
 		if (resize_requested) {
 			_vk_swapchain.resize_swapchain(resize_requested);
+			resize_draw_images();
 		}
 
 		// imgui new frame
@@ -512,6 +495,8 @@ void VulkanEngine::run()
 		if (ImGui::Begin("background")) {
 			ImGui::Text("Frame Time: %d", frame_time);
 			ImGui::SliderFloat("Min Opacity", &min_opacity, 0.0001, 1.0);
+			ImGui::SliderFloat("Scroll Sensitivity", &scroll_sensitivity, 0.02, 1.0);
+			ImGui::SliderFloat("Near Clipping", &clipping_plane, 0.05, 10.0);
 			ImGui::ColorEdit3("Background Color", clear_color.float32, ImGuiColorEditFlags_NoInputs);
 		}
 
@@ -660,7 +645,7 @@ void VulkanEngine::start_rendering(VkCommandBuffer cmd) {
 void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 	glm::vec3 cam_pos_cartesian = glm::vec3{ rad * sin(phi) * cos(theta), rad * cos(phi), rad * sin(phi) * sin(theta) } + center;
 	glm::mat4 view = glm::lookAt(cam_pos_cartesian, center, glm::vec3(0, 1, 0));
-	glm::mat4 projection = glm::perspective(glm::radians(70.f), (float)_draw_extent.width / (float)_draw_extent.height, 0.05f, 10000.f);
+	glm::mat4 projection = glm::perspective(glm::radians(70.f), (float)_draw_extent.width / (float)_draw_extent.height, clipping_plane, 10000.f);
 	float focalX = std::abs(projection[0][0]) * (screen_width * 0.5f);
 	float focalY = std::abs(projection[1][1]) * (screen_height * 0.5f);
 	projection[1][1] *= -1;
@@ -711,13 +696,12 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _splat_pipeline_layout, 2, 1, &splat_set, 0, nullptr);
 
 	GPUDrawPushConstants push_constants;
-	push_constants.vertex_buffer = splat_vertices.vertexBufferAddress;
 	push_constants.focal_x = focalX;
 	push_constants.focal_y = focalY;
 	push_constants.min_opacty = min_opacity;
 	vkCmdPushConstants(cmd, _splat_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(GPUDrawPushConstants), &push_constants);
 
-	vkCmdDraw(cmd, 4, splat_vertices.vert_amt, 0, 0);
+	vkCmdDraw(cmd, 4, scene.splats.size(), 0, 0);
 }
 
 
@@ -749,7 +733,11 @@ void VulkanEngine::cleanup() {
 			_frames[i]._deletion_queue.flush();
 		}
 
+		vkutil::destroy_image(_context, _draw_image);
+		vkutil::destroy_image(_context, _depth_image);
+
 		_main_deletion_queue.flush();
+
 
 		_vk_swapchain.destroy_swapchain();
 
@@ -854,4 +842,15 @@ void VulkanEngine::init_splat_pipeline() {
 		vkDestroyPipelineLayout(_context.device, _splat_pipeline_layout, nullptr);
 		vkDestroyPipeline(_context.device, _splat_pipeline, nullptr);
 		});
+}
+
+void VulkanEngine::resize_draw_images() {
+	vkDeviceWaitIdle(_context.device);
+
+	// already resized window_extent in resize_swapchain but doesnt work??
+	_context.window_extent.width = _vk_swapchain._swapchain_extent.width;
+	_context.window_extent.height = _vk_swapchain._swapchain_extent.height;
+	vkutil::destroy_image(_context, _draw_image);
+	vkutil::destroy_image(_context, _depth_image);
+	init_images();
 }
