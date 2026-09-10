@@ -17,6 +17,7 @@
 
 constexpr unsigned int FRAME_OVERLAP = 2;
 
+struct SplatDepth { uint32_t index; float z; };
 
 struct FrameData {
 	VkSemaphore _swapchain_semaphore;
@@ -94,6 +95,7 @@ public:
 	VkDescriptorSetLayout _splat_data_descriptor_layout;
 	VkDescriptorSetLayout _gpu_scene_data_descriptor_layout;
 	VkDescriptorSetLayout _splat_indicies_descriptor_layout;
+	VkDescriptorSetLayout _test_compute_descriptor_layout;
 
 	VkClearColorValue clear_color;
 
@@ -119,6 +121,11 @@ public:
 
 	Scene scene;
 
+	AllocatedBuffer radix_buf;
+
+	glm::mat4 view;
+	glm::vec3 cam_pos_cartesian;
+	std::vector<SplatDepth> depths;
 
 private:
 
@@ -138,10 +145,14 @@ private:
 	void start_rendering(VkCommandBuffer cmd);
 
 	void end_rendering(VkCommandBuffer cmd);
+	
+	void sort_splats(VkCommandBuffer cmd);
 
 	void draw_geometry(VkCommandBuffer cmd);
 
 	void init_splat_pipeline();
+
+	void init_compute_pipeline();
 
 	void init_default_data();
 

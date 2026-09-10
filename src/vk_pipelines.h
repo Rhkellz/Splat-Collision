@@ -41,3 +41,12 @@ public:
     void enable_blending_additive();
     void enable_blending_alphablend();
 };
+
+class ComputePipelineBuilder {
+public:
+    void set_shader(VkShaderModule shader);
+    void set_layout(VkPipelineLayout layout);
+    VkPipeline build_pipeline(VkDevice device);
+    VkPipelineLayout _pipelineLayout;
+    VkPipelineShaderStageCreateInfo _stageInfo;
+};

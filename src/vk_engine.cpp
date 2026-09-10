@@ -232,6 +232,7 @@ void VulkanEngine::init_descriptors()
 	};
 
 	global_descriptor_allocator.init_pool(_context.device, 10, sizes);
+
 	_main_deletion_queue.push_function([=]() {
 		global_descriptor_allocator.destroy_pool(_context.device);
 		});
@@ -283,6 +284,16 @@ void VulkanEngine::init_descriptors()
 	{
 		DescriptorLayoutBuilder builder;
 		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+		_test_compute_descriptor_layout = builder.build(_context.device, VK_SHADER_STAGE_COMPUTE_BIT);
+	}
+
+	_main_deletion_queue.push_function([&]() {
+		vkDestroyDescriptorSetLayout(_context.device, _test_compute_descriptor_layout, nullptr);
+		});
+
+	{
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
 		_splat_data_descriptor_layout = builder.build(_context.device, VK_SHADER_STAGE_VERTEX_BIT);
 	}
 
@@ -294,6 +305,7 @@ void VulkanEngine::init_descriptors()
 void VulkanEngine::init_pipelines()
 {
 	init_splat_pipeline();
+	init_compute_pipeline();
 }
 
 void VulkanEngine::init_imgui()
@@ -367,7 +379,7 @@ void VulkanEngine::init_default_data() {
 
 void VulkanEngine::init_splats() {
 
-	scene = loadPly("assets/cloud.ply");
+	scene = loadPly("assets/tomatoes.ply");
 	std::cout << scene.splats.size() << " total splats" << std::endl;
 	
 	AllocatedBuffer splat_buffer = vkutil::create_buffer(_context, sizeof(gaussian_splat) * scene.splats.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -390,6 +402,13 @@ void VulkanEngine::init_splats() {
 			vkutil::destroy_buffer(_context, _frames[i]._splat_indicies_buffer);
 			});
 	}
+	
+	depths.resize(scene.splats.size());
+
+	radix_buf = vkutil::create_buffer(_context, sizeof(SplatDepth) * depths.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	_main_deletion_queue.push_function([=]() {
+		vkutil::destroy_buffer(_context, radix_buf);
+		});
 }
 
 void VulkanEngine::run()
@@ -544,6 +563,8 @@ void VulkanEngine::draw() {
 	vkutil::transition_image(cmd, _draw_image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 	vkutil::transition_image(cmd, _depth_image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
 
+	sort_splats(cmd);
+
 	start_rendering(cmd);
 	draw_geometry(cmd);
 	end_rendering(cmd);
@@ -642,9 +663,37 @@ void VulkanEngine::start_rendering(VkCommandBuffer cmd) {
 	vkCmdSetScissor(cmd, 0, 1, &scissor);
 }
 
+void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
+	cam_pos_cartesian = glm::vec3{ rad * sin(phi) * cos(theta), rad * cos(phi), rad * sin(phi) * sin(theta) } + center;
+	view = glm::lookAt(cam_pos_cartesian, center, glm::vec3(0, 1, 0));
+
+	glm::vec4 view_row_z = glm::vec4(view[0][2], view[1][2], view[2][2], view[3][2]);
+	for (uint32_t i = 0; i < scene.splats.size(); ++i) {
+		float z = glm::dot(view_row_z, glm::vec4(scene.splats[i].centroid, 1.0f));
+		depths[i] = { i, z };
+	}
+
+	VkDescriptorSet radix_descriptor = get_current_frame()._frame_descriptors.allocate(_context.device, _test_compute_descriptor_layout);
+	
+	memcpy(radix_buf.allocation->GetMappedData(), depths.data(), sizeof(SplatDepth) * depths.size());
+	{
+		DescriptorWriter writer;
+		writer.write_buffer(0, radix_buf.buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+		writer.update_set(_context.device, radix_descriptor);
+	}
+
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _compute_pipeline);
+
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _compute_pipeline_layout, 0, 1, &radix_descriptor, 0, nullptr);
+
+	uint32_t size_pc = depths.size();
+
+	vkCmdPushConstants(cmd, _compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(uint32_t), &size_pc);
+
+	vkCmdDispatch(cmd, 1, 1, 1);
+}
+
 void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
-	glm::vec3 cam_pos_cartesian = glm::vec3{ rad * sin(phi) * cos(theta), rad * cos(phi), rad * sin(phi) * sin(theta) } + center;
-	glm::mat4 view = glm::lookAt(cam_pos_cartesian, center, glm::vec3(0, 1, 0));
 	glm::mat4 projection = glm::perspective(glm::radians(70.f), (float)_draw_extent.width / (float)_draw_extent.height, clipping_plane, 10000.f);
 	float focalX = std::abs(projection[0][0]) * (screen_width * 0.5f);
 	float focalY = std::abs(projection[1][1]) * (screen_height * 0.5f);
@@ -665,17 +714,6 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 		writer.update_set(_context.device, global_descriptor);
 	}
 
-	// depth sort
-	struct SplatDepth { uint32_t index; float z; };
-	std::vector<SplatDepth> depths(scene.splats.size());
-	glm::vec4 view_row_z = glm::vec4(view[0][2], view[1][2], view[2][2], view[3][2]);
-	for (uint32_t i = 0; i < scene.splats.size(); ++i) {
-		float z = glm::dot(view_row_z, glm::vec4(scene.splats[i].centroid, 1.0f));
-		depths[i] = { i, z };
-	}
-	std::sort(depths.begin(), depths.end(), [](const SplatDepth& a, const SplatDepth& b) {
-		return a.z < b.z; // farthest (most negative view-space z) first
-		});
 
 	AllocatedBuffer sorted_buf = get_current_frame()._splat_indicies_buffer;
 	uint32_t* sorted_gpu = (uint32_t*)sorted_buf.allocation->GetMappedData();
@@ -841,6 +879,45 @@ void VulkanEngine::init_splat_pipeline() {
 	_main_deletion_queue.push_function([&]() {
 		vkDestroyPipelineLayout(_context.device, _splat_pipeline_layout, nullptr);
 		vkDestroyPipeline(_context.device, _splat_pipeline, nullptr);
+		});
+}
+
+void VulkanEngine::init_compute_pipeline() {
+	std::string comp_path = "shaders/radix.comp.spv";
+
+	VkShaderModule comp_shader;
+
+	if (!vkutil::load_shader_module(comp_path.c_str(), _context.device, &comp_shader)) {
+		throw std::runtime_error("Failed to load compute shader");
+	}
+
+	VkPushConstantRange buffer_range{};
+	buffer_range.offset = 0;
+	buffer_range.size = sizeof(uint32_t);
+	buffer_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+	VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
+	VkDescriptorSetLayout layouts[] = {_test_compute_descriptor_layout};
+
+	pipeline_layout_info.pPushConstantRanges = &buffer_range;
+	pipeline_layout_info.pushConstantRangeCount = 1;
+	pipeline_layout_info.pSetLayouts = layouts;
+	pipeline_layout_info.setLayoutCount = 1;
+	VK_CHECK(vkCreatePipelineLayout(_context.device, &pipeline_layout_info, nullptr, &_compute_pipeline_layout));
+
+	ComputePipelineBuilder comp_builder;
+	comp_builder.set_shader(comp_shader);
+	comp_builder.set_layout(_compute_pipeline_layout);
+
+	//finally build the pipeline
+	_compute_pipeline = comp_builder.build_pipeline(_context.device);
+
+	//clean structures
+	vkDestroyShaderModule(_context.device, comp_shader, nullptr);
+
+	_main_deletion_queue.push_function([&]() {
+		vkDestroyPipelineLayout(_context.device, _compute_pipeline_layout, nullptr);
+		vkDestroyPipeline(_context.device, _compute_pipeline, nullptr);
 		});
 }
 

@@ -258,3 +258,31 @@ void PipelineBuilder::enable_blending_alphablend()
     _colorBlendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
     _colorBlendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
 }
+
+void ComputePipelineBuilder::set_shader(VkShaderModule shader) {
+    VkPipelineShaderStageCreateInfo stageinfo{};
+    stageinfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stageinfo.pNext = nullptr;
+    stageinfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stageinfo.module = shader;
+    stageinfo.pName = "main";
+
+    _stageInfo = stageinfo;
+}
+
+void ComputePipelineBuilder::set_layout(VkPipelineLayout layout) {
+    _pipelineLayout = layout;
+}
+
+VkPipeline ComputePipelineBuilder::build_pipeline(VkDevice device) {
+    VkPipeline compute_pipeline;
+
+    VkComputePipelineCreateInfo computePipelineCreateInfo{};
+    computePipelineCreateInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    computePipelineCreateInfo.pNext = nullptr;
+    computePipelineCreateInfo.layout = _pipelineLayout;
+    computePipelineCreateInfo.stage = _stageInfo;
+
+    VK_CHECK(vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &computePipelineCreateInfo, nullptr, &compute_pipeline));
+    return compute_pipeline;
+}
