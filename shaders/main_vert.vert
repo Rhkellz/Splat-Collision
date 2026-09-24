@@ -5,6 +5,7 @@
 
 #include "input_structures.glsl"
 
+
 layout (location = 0) out vec3 out_color;
 layout (location = 1) out vec2 splat_coord;
 layout (location = 2) out float splat_opacity;
@@ -74,7 +75,7 @@ mat3 computeJacobian(vec3 view_space_pos, float focal_x, float focal_y) {
 
 void main() 
 {   
-    int splat_index = int(sorted_indices.indices[gl_InstanceIndex]);
+    int splat_index = int(sorted_indices.indices[gl_InstanceIndex].index);
     vec3 splat_world_pos = splat_buffer.splats[splat_index].center;
 
     vec4 clip_pos = scene_data.proj_matrix * scene_data.view_matrix * vec4(splat_world_pos, 1.0f);

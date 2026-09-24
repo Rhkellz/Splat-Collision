@@ -18,8 +18,13 @@ struct Splat {
 	float pad;
 };
 
+struct SplatDepth {
+    uint index;
+    float z;
+};
+
 layout(set = 2, binding = 0) readonly buffer splat_buffer_t { Splat splats[]; } splat_buffer;
-layout(set = 1, binding = 0) readonly buffer sorted_indices_t { uint indices[]; } sorted_indices;
+layout(set = 1, binding = 0) readonly buffer sorted_indices_t { SplatDepth indices[]; } sorted_indices;
 
 layout( push_constant ) uniform constants
 {	

@@ -18,6 +18,7 @@
 constexpr unsigned int FRAME_OVERLAP = 2;
 
 struct SplatDepth { uint32_t index; float z; };
+struct RadixPushConstants { uint32_t size; uint32_t pass; };
 
 struct FrameData {
 	VkSemaphore _swapchain_semaphore;
@@ -77,7 +78,7 @@ public:
 	DescriptorAllocator global_descriptor_allocator;
 
 
-	VkPipeline _compute_pipeline;
+	VkPipeline _rdx_histogram_pipeline;
 	VkPipelineLayout _compute_pipeline_layout;
 
 	VkFence _imm_fence;
@@ -95,7 +96,8 @@ public:
 	VkDescriptorSetLayout _splat_data_descriptor_layout;
 	VkDescriptorSetLayout _gpu_scene_data_descriptor_layout;
 	VkDescriptorSetLayout _splat_indicies_descriptor_layout;
-	VkDescriptorSetLayout _test_compute_descriptor_layout;
+
+	VkDescriptorSetLayout compute_descriptor_layout;
 
 	VkClearColorValue clear_color;
 
@@ -121,11 +123,14 @@ public:
 
 	Scene scene;
 
-	AllocatedBuffer radix_buf;
+	AllocatedBuffer radix_buffers[2];
+	AllocatedBuffer radix_count_buffer;
 
 	glm::mat4 view;
 	glm::vec3 cam_pos_cartesian;
 	std::vector<SplatDepth> depths;
+
+	bool ran_once = false;
 
 private:
 
@@ -152,7 +157,7 @@ private:
 
 	void init_splat_pipeline();
 
-	void init_compute_pipeline();
+	void init_compute_pipelines();
 
 	void init_default_data();
 
@@ -161,4 +166,6 @@ private:
 	void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
 
 	void resize_draw_images();
+
+	void dispatch_rdx_histogram(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixPushConstants pc);
 };

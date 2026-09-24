@@ -1,22 +1,57 @@
 #version 450
+
 struct SplatDepth {
     uint index;
     float z;
 };
 
-layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
-
-layout(set = 0, binding = 0) buffer Depths {
-    SplatDepth data[];
+struct SplatUint {
+    uint index;
+    uint z;
 };
 
-layout( push_constant ) uniform constants
-{	
-	uint size;
+struct push_constants {
+    uint size;
+    uint pass;
 };
 
-void main() {
-    uint idx = gl_GlobalInvocationID.x;
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) buffer Input {
+    SplatDepth input_data[];
+};
+
+layout(set = 0, binding = 1) buffer Output {
+    SplatDepth output_data[];
+};
+
+layout(set = 0, binding = 2) buffer Count {
+    uint counts[];
+};
+
+layout(push_constant) uniform Constants
+{
+    push_constants constants;
+};
 
 
+
+uint float_to_sortable_uint(float f) { // We just negate as all of our relevant depths are negative, so we can treat them as positive now
+    return ~floatBitsToUint(f); // If camera convention changes this will break
+}
+
+void main()
+{
+    uint thread_idx = gl_GlobalInvocationID.x;
+    if (thread_idx >= constants.size) return;
+
+    SplatUint splat;
+    splat.index = input_data[thread_idx].index;
+    splat.z = float_to_sortable_uint(input_data[thread_idx].z); // optimize by accessing once
+
+    uint z_byte = (splat.z >> (constants.pass * 8)) & 0xFFu;
+
+    atomicAdd(counts[z_byte], 1);
+
+    output_data[thread_idx] = input_data[thread_idx];
 }
