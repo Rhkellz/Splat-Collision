@@ -1,0 +1,123 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic: enable
+#extension GL_KHR_shader_subgroup_arithmetic: enable
+
+// Inspiration taken from https://github.com/MircoWerner/VkRadixSort
+
+struct SplatDepth {
+    uint index;
+    float z;
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+#define WORKGROUP_SIZE gl_WorkGroupSize.x
+const uint RADIX_SORT_BINS = 256;
+const uint SUBGROUP_SIZE = 32; // for my 2060
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+    uint shift;
+    uint num_workgroups;
+    uint num_blocks_per_workgroup;
+} pc;
+
+layout(set = 0, binding = 0) buffer ElementsIn {
+    SplatDepth g_elements_in[];
+};
+
+layout(set = 0, binding = 2) buffer ElementsOut {
+    SplatDepth g_elements_out[];
+};
+
+layout(set = 0, binding = 1) buffer Histograms {
+    uint g_histograms[];
+};
+
+shared uint sums[RADIX_SORT_BINS / SUBGROUP_SIZE];
+shared uint global_offsets[RADIX_SORT_BINS];
+
+struct BinFlags {
+    uint flags[WORKGROUP_SIZE / 32];
+};
+shared BinFlags bin_flags[RADIX_SORT_BINS];
+
+uint float_to_sortable_uint(float f) {
+    return ~floatBitsToUint(f);
+}
+
+void main() {
+    // global offsets (prefix sum across all workgroups histograms)
+    uint local_histogram = 0;
+    uint histogram_count = 0;
+    if (gl_LocalInvocationID.x < RADIX_SORT_BINS) {
+        for (uint j = 0; j < pc.num_workgroups; j++) {
+            uint t = g_histograms[RADIX_SORT_BINS * j + gl_LocalInvocationID.x];
+            local_histogram = (j == gl_WorkGroupID.x) ? histogram_count : local_histogram;
+            histogram_count += t;
+        }
+    }
+
+    uint sum = subgroupAdd(histogram_count);
+    uint prefix_sum = subgroupExclusiveAdd(histogram_count);
+    if (subgroupElect()) {
+        uint target_idx = gl_LocalInvocationID.x / SUBGROUP_SIZE;
+        if (target_idx < (RADIX_SORT_BINS / SUBGROUP_SIZE)) {
+            sums[target_idx] = sum;
+        }
+    }
+    barrier();
+
+    if (gl_LocalInvocationID.x < RADIX_SORT_BINS) {
+        uint sums_prefix_sum = 0;
+        for (uint i = 0; i < gl_SubgroupID; i++) {
+            sums_prefix_sum += sums[i];
+        }
+        global_offsets[gl_LocalInvocationID.x] = sums_prefix_sum + prefix_sum + local_histogram;
+    }
+
+    // stable scatter using bin_flags
+    uint flags_bin = gl_LocalInvocationID.x / 32;
+    uint flags_bit = 1u << (gl_LocalInvocationID.x % 32);
+
+    for (uint index = 0; index < pc.num_blocks_per_workgroup; index++) {
+        barrier();
+        uint elementId = gl_WorkGroupID.x * pc.num_blocks_per_workgroup * WORKGROUP_SIZE + index * WORKGROUP_SIZE + gl_LocalInvocationID.x;
+
+        if (gl_LocalInvocationID.x < RADIX_SORT_BINS) {
+            for (uint i = 0; i < WORKGROUP_SIZE / 32; i++) {
+                bin_flags[gl_LocalInvocationID.x].flags[i] = 0U;
+            }
+        }
+        barrier();
+
+        SplatDepth element_in;
+        uint binID = 0;
+        uint binOffset = 0;
+        bool valid = elementId < pc.num_elements;
+        if (valid) {
+            element_in = g_elements_in[elementId];
+            uint z = float_to_sortable_uint(element_in.z);
+            binID = (z >> pc.shift) & (RADIX_SORT_BINS - 1);
+            binOffset = global_offsets[binID];
+            atomicAdd(bin_flags[binID].flags[flags_bin], flags_bit);
+        }
+        barrier();
+
+        if (valid) {
+            uint prefix = 0;
+            uint count = 0;
+            for (uint i = 0; i < WORKGROUP_SIZE / 32; i++) {
+                uint bits = bin_flags[binID].flags[i];
+                uint full_count = bitCount(bits);
+                uint partial_count = bitCount(bits & (flags_bit - 1));
+                prefix += (i < flags_bin) ? full_count : 0U;
+                prefix += (i == flags_bin) ? partial_count : 0U;
+                count += full_count;
+            }
+            g_elements_out[binOffset + prefix] = element_in;
+            if (prefix == count - 1) {
+                atomicAdd(global_offsets[binID], count);
+            }
+        }
+    }
+}

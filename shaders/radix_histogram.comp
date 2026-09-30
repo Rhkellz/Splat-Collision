@@ -1,0 +1,55 @@
+#version 450
+
+// Inspiration taken from https://github.com/MircoWerner/VkRadixSort
+
+struct SplatDepth {
+    uint index;
+    float z;
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+#define WORKGROUP_SIZE gl_WorkGroupSize.x
+const uint RADIX_SORT_BINS = 256;
+
+layout(push_constant) uniform PushConstants {
+    uint num_elements;
+    uint shift;
+    uint num_workgroups;
+    uint num_blocks_per_workgroup;
+} pc;
+
+layout(set = 0, binding = 0) buffer ElementsIn {
+    SplatDepth g_elements_in[];
+};
+
+layout(set = 0, binding = 1) buffer Histograms {
+    uint g_histograms[]; // size = RADIX_SORT_BINS * num_workgroups
+};
+
+shared uint histogram[256];
+
+uint float_to_sortable_uint(float f) {
+    return ~floatBitsToUint(f);
+}
+
+void main() {
+    if (gl_LocalInvocationID.x < RADIX_SORT_BINS) {
+        histogram[gl_LocalInvocationID.x] = 0U;
+    }
+    barrier();
+
+    for (uint index = 0; index < pc.num_blocks_per_workgroup; index++) {
+        uint elementId = gl_WorkGroupID.x * pc.num_blocks_per_workgroup * WORKGROUP_SIZE + index * WORKGROUP_SIZE + gl_LocalInvocationID.x;
+        if (elementId < pc.num_elements) {
+            uint z = float_to_sortable_uint(g_elements_in[elementId].z);
+            uint bin = (z >> pc.shift) & (RADIX_SORT_BINS - 1);
+            atomicAdd(histogram[bin], 1U);
+        }
+    }
+    barrier();
+
+    if (gl_LocalInvocationID.x < RADIX_SORT_BINS) {
+        g_histograms[RADIX_SORT_BINS * gl_WorkGroupID.x + gl_LocalInvocationID.x] = histogram[gl_LocalInvocationID.x];
+    }
+}

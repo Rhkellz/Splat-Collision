@@ -103,8 +103,8 @@ void VulkanEngine::init_vulkan() {
 
 	VkPhysicalDeviceFeatures features{};
 	features.largePoints = true;
-	//use vkbootstrap to select a gpu.
-	//We want a gpu that can write to the SDL surface and supports vulkan 1.3 with the correct features
+	// use vkbootstrap to select a gpu.
+	// We want a gpu that can write to the SDL surface and supports vulkan 1.3 with the correct features
 	vkb::PhysicalDeviceSelector selector{ vkb_inst };
 	vkb::PhysicalDevice physical_device = selector
 		.set_minimum_version(1, 3)
@@ -115,7 +115,7 @@ void VulkanEngine::init_vulkan() {
 		.select()
 		.value();
 
-	//create the final vulkan device
+	// create the final vulkan device
 	vkb::DeviceBuilder device_builder{ physical_device };
 
 	vkb::Device vkbDevice = device_builder.build().value();
@@ -139,7 +139,7 @@ void VulkanEngine::init_vulkan() {
 }
 
 void VulkanEngine::init_images() {
-	//hardcoding the draw format to 32 bit float
+	// hardcoding the draw format to 32 bit float
 	VkFormat draw_image_format = VK_FORMAT_R16G16B16A16_SFLOAT;
 	VkExtent3D draw_image_extent = { _context.window_extent.width, _context.window_extent.height, 1 };
 
@@ -153,13 +153,11 @@ void VulkanEngine::init_images() {
 	screen_width = _draw_image.imageExtent.width;
 	screen_height = _draw_image.imageExtent.height;
 	
-
 	VkFormat depth_image_format = VK_FORMAT_D32_SFLOAT;
 	VkImageUsageFlags depth_image_flags = {};
 	depth_image_flags |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
 
 	_depth_image = vkutil::create_image(_context, draw_image_extent, depth_image_format, depth_image_flags, false, VK_SAMPLE_COUNT_1_BIT);
-
 }
 
 void VulkanEngine::init_commands() {
@@ -283,9 +281,9 @@ void VulkanEngine::init_descriptors()
 
 	{
 		DescriptorLayoutBuilder builder;
-		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);// using an SSBO for the count buffer is probably not very effecient, change later
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // elements in
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // histograms
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // elements out
 		compute_descriptor_layout = builder.build(_context.device, VK_SHADER_STAGE_COMPUTE_BIT);
 	}
 
@@ -381,7 +379,7 @@ void VulkanEngine::init_default_data() {
 
 void VulkanEngine::init_splats() {
 
-	scene = loadPly("assets/tomatoes.ply");
+	scene = loadPly("assets/bug.ply");
 	std::cout << scene.splats.size() << " total splats" << std::endl;
 	
 	AllocatedBuffer splat_buffer = vkutil::create_buffer(_context, sizeof(gaussian_splat) * scene.splats.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -397,16 +395,10 @@ void VulkanEngine::init_splats() {
 	DescriptorWriter writer;
 	writer.write_buffer(0, splat_buffer.buffer, sizeof(gaussian_splat) * scene.splats.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
 	writer.update_set(_context.device, splat_set);
-
-	for (int i = 0; i < FRAME_OVERLAP; i++) {
-		_frames[i]._splat_indicies_buffer = vkutil::create_buffer(_context, sizeof(uint32_t) * scene.splats.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-		_main_deletion_queue.push_function([&, i]() {
-			vkutil::destroy_buffer(_context, _frames[i]._splat_indicies_buffer);
-			});
-	}
 	
 	depths.resize(scene.splats.size());
 
+	// radix stuff 
 	radix_buffers[0] = vkutil::create_buffer(_context, sizeof(SplatDepth) * depths.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 	_main_deletion_queue.push_function([=]() {
 		vkutil::destroy_buffer(_context, radix_buffers[0]);
@@ -417,7 +409,7 @@ void VulkanEngine::init_splats() {
 		vkutil::destroy_buffer(_context, radix_buffers[1]);
 		});
 
-	radix_count_buffer = vkutil::create_buffer(_context, sizeof(uint32_t) * 256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);// maybe just gpu
+	radix_count_buffer = vkutil::create_buffer(_context, sizeof(uint32_t) * 256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);// maybe just gpu
 	_main_deletion_queue.push_function([=]() {
 		vkutil::destroy_buffer(_context, radix_count_buffer);
 		});
@@ -528,6 +520,7 @@ void VulkanEngine::run()
 			ImGui::SliderFloat("Min Opacity", &min_opacity, 0.0001, 1.0);
 			ImGui::SliderFloat("Scroll Sensitivity", &scroll_sensitivity, 0.02, 1.0);
 			ImGui::SliderFloat("Near Clipping", &clipping_plane, 0.05, 10.0);
+			ImGui::InputInt("Radix Sort Work Groups", &num_workgroups);
 			ImGui::ColorEdit3("Background Color", clear_color.float32, ImGuiColorEditFlags_NoInputs);
 		}
 
@@ -540,133 +533,126 @@ void VulkanEngine::run()
 }
 
 void VulkanEngine::draw() {
-	if (!ran_once) {
-		// wait for sync
-		VK_CHECK(vkWaitForFences(_context.device, 1, &get_current_frame()._render_fence, true, 1000000000));
-		VK_CHECK(vkResetFences(_context.device, 1, &get_current_frame()._render_fence));
+	// wait for sync
+	VK_CHECK(vkWaitForFences(_context.device, 1, &get_current_frame()._render_fence, true, 1000000000));
+	VK_CHECK(vkResetFences(_context.device, 1, &get_current_frame()._render_fence));
 
-		get_current_frame()._deletion_queue.flush();
-		get_current_frame()._frame_descriptors.clear_pools(_context.device);
+	get_current_frame()._deletion_queue.flush();
+	get_current_frame()._frame_descriptors.clear_pools(_context.device);
 
-		uint32_t swapchain_image_idx;
-		// _swapchain_semaphore will be signaled when the image is ready
-		VkResult e = vkAcquireNextImageKHR(_context.device, _vk_swapchain._swapchain, 1000000000, get_current_frame()._swapchain_semaphore, nullptr, &swapchain_image_idx);
-		if (e == VK_ERROR_OUT_OF_DATE_KHR) {
-			resize_requested = true;
-			return;
-		}
-
-		VkCommandBuffer cmd = get_current_frame()._main_command_buffer;
-
-		// now that we are sure that the commands finished executing, we can safely
-		// reset the command buffer to begin recording again.
-		VK_CHECK(vkResetCommandBuffer(cmd, 0));
-
-		// begin the command buffer recording. We will use this command buffer exactly once, so we want to let vulkan know that
-		VkCommandBufferBeginInfo cmdBeginInfo = vkinit::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-
-		// start the command buffer recording
-		VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
-
-		_draw_extent.height = std::min(_vk_swapchain._swapchain_extent.height, _draw_image.imageExtent.height);
-		_draw_extent.width = std::min(_vk_swapchain._swapchain_extent.width, _draw_image.imageExtent.width);
-
-		// transition our main draw image into general layout so we can write into it
-		// we will overwrite it all so we dont care about what was the older layout
-		vkutil::transition_image(cmd, _draw_image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
-		vkutil::transition_image(cmd, _depth_image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
-
-		sort_splats(cmd);
-		VkBufferMemoryBarrier2 barrier {
-		.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
-		.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-		.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-
-		.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
-		.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
-
-		.buffer = radix_buffers[1].buffer,
-		.offset = 0,
-		.size = sizeof(SplatDepth) * depths.size()
-		};
-
-		VkDependencyInfo dependency{
-			.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
-			.bufferMemoryBarrierCount = 1,
-			.pBufferMemoryBarriers = &barrier
-		};
-
-		vkCmdPipelineBarrier2(cmd, &dependency);
-		start_rendering(cmd);
-		draw_geometry(cmd);
-		end_rendering(cmd);
-
-		draw_imgui(cmd, _draw_image.imageView);
-
-		// transition the draw image and the swapchain image into their correct transfer layouts
-		vkutil::transition_image(cmd, _draw_image.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-		vkutil::transition_image(cmd, _vk_swapchain._swapchain_images[swapchain_image_idx], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-
-		// execute a copy from the draw image into the swapchain
-		vkutil::copy_image_to_image(cmd, _draw_image.image, _vk_swapchain._swapchain_images[swapchain_image_idx], _draw_extent, _vk_swapchain._swapchain_extent);
-
-		// switch to present
-		vkutil::transition_image(cmd, _vk_swapchain._swapchain_images[swapchain_image_idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-
-		// finalize the command buffer (we can no longer add commands, but it can now be executed)
-		VK_CHECK(vkEndCommandBuffer(cmd));
-
-		// prepare the submission to the queue. 
-		// we want to wait on the _presentSemaphore, as that semaphore is signaled when the swapchain is ready
-		// we will signal the _render_semaphore, to signal that rendering has finished
-
-		VkCommandBufferSubmitInfo cmdinfo = vkinit::command_buffer_submit_info(cmd);
-
-		// gpu will wait when it needs to write colors for swapchain semaphore so we dont write onto an image currently being used
-		VkSemaphoreSubmitInfo waitInfo = vkinit::semaphore_submit_info(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR, get_current_frame()._swapchain_semaphore);
-		// signal render semaphore when done rendering
-		VkSemaphoreSubmitInfo signalInfo = vkinit::semaphore_submit_info(VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, _vk_swapchain._present_semaphores[swapchain_image_idx]);
-
-		VkSubmitInfo2 submit = vkinit::submit_info(&cmdinfo, &signalInfo, &waitInfo);
-
-		//submit command buffer to the queue and execute it.
-		// _render_fence will now block until the graphic commands finish execution
-		VK_CHECK(vkQueueSubmit2(_graphics_queue, 1, &submit, get_current_frame()._render_fence));
-
-		// prepare present
-		// this will put the image we just rendered to into the visible window.
-		// we want to wait on the _render_semaphore for that, 
-		// as its necessary that drawing commands have finished before the image is displayed to the user
-		VkPresentInfoKHR presentInfo = {};
-		presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-		presentInfo.pNext = nullptr;
-		presentInfo.pSwapchains = &_vk_swapchain._swapchain;
-		presentInfo.swapchainCount = 1;
-
-		// Do not show the image until render semaphore is signaled
-		presentInfo.pWaitSemaphores = &_vk_swapchain._present_semaphores[swapchain_image_idx];
-		presentInfo.waitSemaphoreCount = 1;
-
-		presentInfo.pImageIndices = &swapchain_image_idx;
-
-		VkResult presentResult = vkQueuePresentKHR(_graphics_queue, &presentInfo);
-		if (presentResult == VK_ERROR_OUT_OF_DATE_KHR) {
-			resize_requested = true;
-		}
-
-		//increase the number of frames drawn
-		_frame_number++;
-		curr_time = std::chrono::steady_clock::now();
-
-		frame_time = std::chrono::duration_cast<std::chrono::milliseconds>(curr_time - prev_time).count();
-
-		prev_time = curr_time;
-
-		ran_once = true;
+	uint32_t swapchain_image_idx;
+	// _swapchain_semaphore will be signaled when the image is ready
+	VkResult e = vkAcquireNextImageKHR(_context.device, _vk_swapchain._swapchain, 1000000000, get_current_frame()._swapchain_semaphore, nullptr, &swapchain_image_idx);
+	if (e == VK_ERROR_OUT_OF_DATE_KHR) {
+		resize_requested = true;
+		return;
 	}
- else {
-	 return;
+
+	VkCommandBuffer cmd = get_current_frame()._main_command_buffer;
+
+	// now that we are sure that the commands finished executing, we can safely
+	// reset the command buffer to begin recording again.
+	VK_CHECK(vkResetCommandBuffer(cmd, 0));
+
+	// begin the command buffer recording. We will use this command buffer exactly once, so we want to let vulkan know that
+	VkCommandBufferBeginInfo cmdBeginInfo = vkinit::command_buffer_begin_info(VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+
+	// start the command buffer recording
+	VK_CHECK(vkBeginCommandBuffer(cmd, &cmdBeginInfo));
+
+	_draw_extent.height = std::min(_vk_swapchain._swapchain_extent.height, _draw_image.imageExtent.height);
+	_draw_extent.width = std::min(_vk_swapchain._swapchain_extent.width, _draw_image.imageExtent.width);
+
+	// transition our main draw image into general layout so we can write into it
+	// we will overwrite it all so we dont care about what was the older layout
+	vkutil::transition_image(cmd, _draw_image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	vkutil::transition_image(cmd, _depth_image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL);
+
+	sort_splats(cmd);
+	VkBufferMemoryBarrier2 barrier {
+	.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2,
+	.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+	.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+
+	.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
+	.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+
+	.buffer = radix_buffers[1].buffer,
+	.offset = 0,
+	.size = sizeof(SplatDepth) * depths.size()
+	};
+
+	VkDependencyInfo dependency{
+		.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+		.bufferMemoryBarrierCount = 1,
+		.pBufferMemoryBarriers = &barrier
+	};
+
+	vkCmdPipelineBarrier2(cmd, &dependency);
+	start_rendering(cmd);
+	draw_geometry(cmd);
+	end_rendering(cmd);
+
+	draw_imgui(cmd, _draw_image.imageView);
+
+	// transition the draw image and the swapchain image into their correct transfer layouts
+	vkutil::transition_image(cmd, _draw_image.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	vkutil::transition_image(cmd, _vk_swapchain._swapchain_images[swapchain_image_idx], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+	// execute a copy from the draw image into the swapchain
+	vkutil::copy_image_to_image(cmd, _draw_image.image, _vk_swapchain._swapchain_images[swapchain_image_idx], _draw_extent, _vk_swapchain._swapchain_extent);
+
+	// switch to present
+	vkutil::transition_image(cmd, _vk_swapchain._swapchain_images[swapchain_image_idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+	// finalize the command buffer (we can no longer add commands, but it can now be executed)
+	VK_CHECK(vkEndCommandBuffer(cmd));
+
+	// prepare the submission to the queue. 
+	// we want to wait on the _presentSemaphore, as that semaphore is signaled when the swapchain is ready
+	// we will signal the _render_semaphore, to signal that rendering has finished
+
+	VkCommandBufferSubmitInfo cmdinfo = vkinit::command_buffer_submit_info(cmd);
+
+	// gpu will wait when it needs to write colors for swapchain semaphore so we dont write onto an image currently being used
+	VkSemaphoreSubmitInfo waitInfo = vkinit::semaphore_submit_info(VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR, get_current_frame()._swapchain_semaphore);
+	// signal render semaphore when done rendering
+	VkSemaphoreSubmitInfo signalInfo = vkinit::semaphore_submit_info(VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT, _vk_swapchain._present_semaphores[swapchain_image_idx]);
+
+	VkSubmitInfo2 submit = vkinit::submit_info(&cmdinfo, &signalInfo, &waitInfo);
+
+	//submit command buffer to the queue and execute it.
+	// _render_fence will now block until the graphic commands finish execution
+	VK_CHECK(vkQueueSubmit2(_graphics_queue, 1, &submit, get_current_frame()._render_fence));
+
+	// prepare present
+	// this will put the image we just rendered to into the visible window.
+	// we want to wait on the _render_semaphore for that, 
+	// as its necessary that drawing commands have finished before the image is displayed to the user
+	VkPresentInfoKHR presentInfo = {};
+	presentInfo.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+	presentInfo.pNext = nullptr;
+	presentInfo.pSwapchains = &_vk_swapchain._swapchain;
+	presentInfo.swapchainCount = 1;
+
+	// Do not show the image until render semaphore is signaled
+	presentInfo.pWaitSemaphores = &_vk_swapchain._present_semaphores[swapchain_image_idx];
+	presentInfo.waitSemaphoreCount = 1;
+
+	presentInfo.pImageIndices = &swapchain_image_idx;
+
+	VkResult presentResult = vkQueuePresentKHR(_graphics_queue, &presentInfo);
+	if (presentResult == VK_ERROR_OUT_OF_DATE_KHR) {
+		resize_requested = true;
 	}
+
+	// increase the number of frames drawn
+	_frame_number++;
+	// keep track of frame time
+	curr_time = std::chrono::steady_clock::now();
+	frame_time = std::chrono::duration_cast<std::chrono::milliseconds>(curr_time - prev_time).count();
+	prev_time = curr_time;
+
 }
 
 void VulkanEngine::start_rendering(VkCommandBuffer cmd) {
@@ -702,6 +688,7 @@ void VulkanEngine::start_rendering(VkCommandBuffer cmd) {
 }
 
 void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
+	// compute this stuff early so we know what z to use
 	cam_pos_cartesian = glm::vec3{ rad * sin(phi) * cos(theta), rad * cos(phi), rad * sin(phi) * sin(theta) } + center;
 	view = glm::lookAt(cam_pos_cartesian, center, glm::vec3(0, 1, 0));
 
@@ -710,25 +697,41 @@ void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
 		float z = glm::dot(view_row_z, glm::vec4(scene.splats[i].centroid, 1.0f));
 		depths[i] = { i, z };
 	}
-
-	VkDescriptorSet radix_descriptor = get_current_frame()._frame_descriptors.allocate(_context.device, compute_descriptor_layout);
-
+	// TODO: only sort splats within view frustum (one compute shader testing each splat)
 	memcpy(radix_buffers[0].allocation->GetMappedData(), depths.data(), sizeof(SplatDepth) * depths.size());
+
+	uint32_t WORKGROUP_SIZE = 256;
+	uint32_t num_elements = static_cast<uint32_t>(depths.size());
+	// num workgroups is already set
+	uint32_t elements_per_workgroup = (num_elements + num_workgroups - 1) / num_workgroups;
+	uint32_t num_blocks_per_workgroup = (elements_per_workgroup + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+
+
+	VkDescriptorSet radix_descriptor_even = get_current_frame()._frame_descriptors.allocate(_context.device, compute_descriptor_layout);
 	{
 		DescriptorWriter writer;
-		writer.write_buffer(0, radix_buffers[0].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-		writer.write_buffer(1, radix_buffers[1].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-		writer.write_buffer(2, radix_count_buffer.buffer, sizeof(uint32_t) * 256, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
-		writer.update_set(_context.device, radix_descriptor);
+		writer.write_buffer(0, radix_buffers[0].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // in
+		writer.write_buffer(1, radix_count_buffer.buffer, sizeof(uint32_t) * 256 * num_workgroups, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // histograms
+		writer.write_buffer(2, radix_buffers[1].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // out
+		writer.update_set(_context.device, radix_descriptor_even);
 	}
 
-	uint32_t size_test = 10;
+	VkDescriptorSet radix_descriptor_odd = get_current_frame()._frame_descriptors.allocate(_context.device, compute_descriptor_layout);
+	{
+		DescriptorWriter writer;
+		writer.write_buffer(0, radix_buffers[1].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // in
+		writer.write_buffer(1, radix_count_buffer.buffer, sizeof(uint32_t) * 256 * num_workgroups, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // histograms
+		writer.write_buffer(2, radix_buffers[0].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // out
+		writer.update_set(_context.device, radix_descriptor_odd);
+	}
 
 	immediate_submit([&](VkCommandBuffer imm_cmd) {
-		for (uint32_t pass = 0; pass < 4; pass++) { // four passes, 4 bits in uint32_t
+		for (uint32_t pass = 0; pass < 4; pass++) { // 4 passes, 8 bits per pass = uint32_t
+			VkDescriptorSet radix_descriptor = (pass % 2 == 0) ? radix_descriptor_even : radix_descriptor_odd;
+
 			vkCmdFillBuffer(imm_cmd, radix_count_buffer.buffer, 0, VK_WHOLE_SIZE, 0);
 
-			VkMemoryBarrier2 fill_barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // make sure we dont dispatch before zero-initializing count buffer
+			VkMemoryBarrier2 fill_barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // make sure we don't dispatch before zero-initializing count buffer
 			fill_barrier.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
 			fill_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
 			fill_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
@@ -739,65 +742,37 @@ void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
 			fill_dep.pMemoryBarriers = &fill_barrier;
 			vkCmdPipelineBarrier2(imm_cmd, &fill_dep);
 
-			RadixPushConstants pc;
-			pc.size = size_test;
-			pc.pass = pass;
+			RadixPushConstants pc = { depths.size(), pass * 8, num_workgroups, num_blocks_per_workgroup};
 
 			dispatch_rdx_histogram(radix_descriptor, imm_cmd, pc);
-			// dispatch prefix sum
-			// dispatch scatter
-			// also some barriers
 
-
-			fill_barrier = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // make sure we dont zero-initialize count buffer until after dispatch
+			fill_barrier = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // don't read in scan shader until histogram writes are done
 			fill_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-			fill_barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT;
-			fill_barrier.dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
-			fill_barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+			fill_barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+			fill_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+			fill_barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
 
 			fill_dep = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
 			fill_dep.memoryBarrierCount = 1;
 			fill_dep.pMemoryBarriers = &fill_barrier;
 			vkCmdPipelineBarrier2(imm_cmd, &fill_dep);
+
+			dispatch_rdx_scan_scat(radix_descriptor, imm_cmd, pc);
+
+			fill_barrier = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // don't zero count buffer (next pass) until scatter is done reading it, and don't read scattered output until scatter writes are done
+			fill_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+			fill_barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+			fill_barrier.dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+			fill_barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT;
+
+			fill_dep = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+			fill_dep.memoryBarrierCount = 1;
+			fill_dep.pMemoryBarriers = &fill_barrier;
+			vkCmdPipelineBarrier2(imm_cmd, &fill_dep);
+
+			final_rdx_buffer_idx = (pass % 2 == 0) ? 1 : 0;
 		}
-	});
-
-	// DEBUG
-
-	std::cout << "printing unsorted" << std::endl;
-	for (uint32_t i = 0; i < size_test; i++) {
-		std::cout << "index: " << depths[i].index << " z: " << depths[i].z << "\n";
-	}
-
-	std::vector<SplatDepth> temp_sorted(depths.begin(), depths.begin() + size_test);
-	std::sort(temp_sorted.begin(), temp_sorted.end(), [](SplatDepth a, SplatDepth b) { return a.z < b.z; });
-
-	SplatDepth* mapped_ptr = static_cast<SplatDepth*>(radix_buffers[1].allocation->GetMappedData());
-	std::vector<SplatDepth> temp_trial_sorted(mapped_ptr, mapped_ptr + size_test);
-
-	uint32_t correct = 0;
-	for (uint32_t i = 0; i < size_test; i++) {
-		if (temp_sorted[i].z == temp_trial_sorted[i].z) {
-			correct++;
-		}
-	}
-
-	std::cout << " " << std::endl;
-	std::cout << "printing sorted" << std::endl;
-	for (uint32_t i = 0; i < size_test; i++) {
-		std::cout << "index: " << temp_sorted[i].index << " z: " << temp_sorted[i].z << "\n";
-	}
-
-	std::cout << correct << " / " << size_test << ", " << static_cast<float>(correct) / static_cast<float>(size_test) * 100.0 << "% sorted" << std::endl;
-
-	uint32_t* count_mapped_ptr = static_cast<uint32_t*>(radix_count_buffer.allocation->GetMappedData());
-	std::vector<uint32_t> temp_count_sorted(count_mapped_ptr, count_mapped_ptr + 255);
-
-	std::cout << " " << std::endl;
-	std::cout << "printing counts" << std::endl;
-	for (uint32_t i = 0; i < 255; i++) {
-		std::cout << "index: " << i << " number: " << temp_count_sorted[i] << "\n";
-	}
+		});
 }
 
 void VulkanEngine::dispatch_rdx_histogram(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixPushConstants pc) {
@@ -805,11 +780,20 @@ void VulkanEngine::dispatch_rdx_histogram(VkDescriptorSet radix_descriptor, VkCo
 	vkCmdBindPipeline(imm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _rdx_histogram_pipeline);
 	vkCmdBindDescriptorSets(imm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _compute_pipeline_layout, 0, 1, &radix_descriptor, 0, nullptr);
 	vkCmdPushConstants(imm_cmd, _compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RadixPushConstants), &pc);
-	vkCmdDispatch(imm_cmd, pc.size, 1, 1);
+	vkCmdDispatch(imm_cmd, pc.num_workgroups, 1, 1);
 }
 
+void VulkanEngine::dispatch_rdx_scan_scat(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixPushConstants pc) {
+
+	vkCmdBindPipeline(imm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _rdx_scan_scat_pipeline);
+	vkCmdBindDescriptorSets(imm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _compute_pipeline_layout, 0, 1, &radix_descriptor, 0, nullptr);
+	vkCmdPushConstants(imm_cmd, _compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RadixPushConstants), &pc);
+	vkCmdDispatch(imm_cmd, pc.num_workgroups, 1, 1); // single workgroup of 256 threads covers all 256 buckets
+}
+
+
 void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
-	glm::mat4 projection = glm::perspective(glm::radians(70.f), (float)_draw_extent.width / (float)_draw_extent.height, clipping_plane, 10000.f);
+	glm::mat4 projection = glm::perspective(glm::radians(70.f), (float)_draw_extent.width / (float)_draw_extent.height, clipping_plane, 10000.f);// should fix arbitrary val
 	float focalX = std::abs(projection[0][0]) * (screen_width * 0.5f);
 	float focalY = std::abs(projection[1][1]) * (screen_height * 0.5f);
 	projection[1][1] *= -1;
@@ -833,7 +817,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 	VkDescriptorSet sorted_descriptor = get_current_frame()._frame_descriptors.allocate(_context.device, _splat_indicies_descriptor_layout);
 	{
 		DescriptorWriter writer;
-		writer.write_buffer(0, radix_buffers[1].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+		writer.write_buffer(0, radix_buffers[final_rdx_buffer_idx].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
 		writer.update_set(_context.device, sorted_descriptor);
 	}
 
@@ -993,12 +977,18 @@ void VulkanEngine::init_splat_pipeline() {
 }
 
 void VulkanEngine::init_compute_pipelines() {
-	std::string comp_path = "shaders/radix.comp.spv";
+	std::string rdx_histogram_path = "shaders/radix_histogram.comp.spv";
+	std::string rdx_scan_scat_path = "shaders/radix_scan_scat.comp.spv";
 
-	VkShaderModule comp_shader;
+	VkShaderModule rdx_histogram_shader;
+	VkShaderModule rdx_scan_scat_shader;
 
-	if (!vkutil::load_shader_module(comp_path.c_str(), _context.device, &comp_shader)) {
-		throw std::runtime_error("Failed to load compute shader");
+	if (!vkutil::load_shader_module(rdx_histogram_path.c_str(), _context.device, &rdx_histogram_shader)) {
+		throw std::runtime_error("Failed to load radix histogram shader");
+	}
+
+	if (!vkutil::load_shader_module(rdx_scan_scat_path.c_str(), _context.device, &rdx_scan_scat_shader)) {
+		throw std::runtime_error("Failed to load radix scan shader");
 	}
 
 	VkPushConstantRange buffer_range{};
@@ -1015,19 +1005,30 @@ void VulkanEngine::init_compute_pipelines() {
 	pipeline_layout_info.setLayoutCount = 1;
 	VK_CHECK(vkCreatePipelineLayout(_context.device, &pipeline_layout_info, nullptr, &_compute_pipeline_layout));
 
-	ComputePipelineBuilder comp_builder;
-	comp_builder.set_shader(comp_shader);
-	comp_builder.set_layout(_compute_pipeline_layout);
+	// finally build the pipelines
 
-	//finally build the pipeline
-	_rdx_histogram_pipeline = comp_builder.build_pipeline(_context.device);
+	{
+		ComputePipelineBuilder comp_builder;
+		comp_builder.set_shader(rdx_histogram_shader);
+		comp_builder.set_layout(_compute_pipeline_layout);
+		_rdx_histogram_pipeline = comp_builder.build_pipeline(_context.device);
+	}
 
-	//clean structures
-	vkDestroyShaderModule(_context.device, comp_shader, nullptr);
+	{
+		ComputePipelineBuilder comp_builder;
+		comp_builder.set_shader(rdx_scan_scat_shader);
+		comp_builder.set_layout(_compute_pipeline_layout);
+		_rdx_scan_scat_pipeline = comp_builder.build_pipeline(_context.device);
+	}
+
+	// clean structures
+	vkDestroyShaderModule(_context.device, rdx_histogram_shader, nullptr);
+	vkDestroyShaderModule(_context.device, rdx_scan_scat_shader, nullptr);
 
 	_main_deletion_queue.push_function([&]() {
 		vkDestroyPipelineLayout(_context.device, _compute_pipeline_layout, nullptr);
 		vkDestroyPipeline(_context.device, _rdx_histogram_pipeline, nullptr);
+		vkDestroyPipeline(_context.device, _rdx_scan_scat_pipeline, nullptr);
 		});
 }
 

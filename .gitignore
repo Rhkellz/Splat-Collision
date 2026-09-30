@@ -35,3 +35,6 @@ Makefile
 
 # Vulkan shader binaries
 *.spv
+
+# Extra ply files
+*.ply

@@ -73,6 +73,7 @@ mat3 computeJacobian(vec3 view_space_pos, float focal_x, float focal_y) {
     ));
 }
 
+
 void main() 
 {   
     int splat_index = int(sorted_indices.indices[gl_InstanceIndex].index);

@@ -18,7 +18,12 @@
 constexpr unsigned int FRAME_OVERLAP = 2;
 
 struct SplatDepth { uint32_t index; float z; };
-struct RadixPushConstants { uint32_t size; uint32_t pass; };
+struct RadixPushConstants {
+	uint32_t num_elements;
+	uint32_t shift;              // pass * 8
+	uint32_t num_workgroups;
+	uint32_t num_blocks_per_workgroup;
+};
 
 struct FrameData {
 	VkSemaphore _swapchain_semaphore;
@@ -31,7 +36,6 @@ struct FrameData {
 	DescriptorAllocatorGrowable _frame_descriptors;
 
 	AllocatedBuffer _GPU_scene_data_buffer;
-	AllocatedBuffer _splat_indicies_buffer;
 };
 
 
@@ -79,6 +83,7 @@ public:
 
 
 	VkPipeline _rdx_histogram_pipeline;
+	VkPipeline _rdx_scan_scat_pipeline;
 	VkPipelineLayout _compute_pipeline_layout;
 
 	VkFence _imm_fence;
@@ -118,6 +123,7 @@ public:
 	float min_opacity = 0.001;
 	float scroll_sensitivity = 0.02;
 	float clipping_plane = 0.05;
+	int num_workgroups = 64;
 
 	VkDescriptorSet splat_set;
 
@@ -129,8 +135,8 @@ public:
 	glm::mat4 view;
 	glm::vec3 cam_pos_cartesian;
 	std::vector<SplatDepth> depths;
+	int final_rdx_buffer_idx = 0;
 
-	bool ran_once = false;
 
 private:
 
@@ -168,4 +174,8 @@ private:
 	void resize_draw_images();
 
 	void dispatch_rdx_histogram(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixPushConstants pc);
+
+	void dispatch_rdx_scan_scat(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixPushConstants pc);
+
+
 };
