@@ -130,7 +130,6 @@ public:
 	AllocatedBuffer splat_scales;
 	
 	AllocatedBuffer indirect_draw_buffer;
-	AllocatedBuffer indirect_dispatch_buffer;
 
 	AllocatedBuffer rdx_buffers[2];
 	AllocatedBuffer rdx_count_buffer;

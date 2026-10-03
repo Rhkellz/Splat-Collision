@@ -234,7 +234,7 @@ inline Scene loadPly(const std::string& path) {
         splat.centroid = {
             plyDetail::readAsFloat(row, x),
             -1.0f * plyDetail::readAsFloat(row, y),
-            plyDetail::readAsFloat(row, z),
+            -1.0f * plyDetail::readAsFloat(row, z),
         };
         splat.spherical_harmonics[0] = plyDetail::readAsFloat(row, dcR);
         splat.spherical_harmonics[1] = plyDetail::readAsFloat(row, dcG);
@@ -252,10 +252,10 @@ inline Scene loadPly(const std::string& path) {
         splat.scale[0] = std::exp(plyDetail::readAsFloat(row, scale0));
         splat.scale[1] = std::exp(plyDetail::readAsFloat(row, scale1));
         splat.scale[2] = std::exp(plyDetail::readAsFloat(row, scale2));
-        splat.rotation[0] = plyDetail::readAsFloat(row, rot0);
+        splat.rotation[0] = -1.0f * plyDetail::readAsFloat(row, rot0);
         splat.rotation[1] = plyDetail::readAsFloat(row, rot1);
         splat.rotation[2] = plyDetail::readAsFloat(row, rot2);
-        splat.rotation[3] = plyDetail::readAsFloat(row, rot3);
+        splat.rotation[3] = -1.0f * plyDetail::readAsFloat(row, rot3);
         result.splats.push_back(splat);
 
         result.average_centroid += splat.centroid;

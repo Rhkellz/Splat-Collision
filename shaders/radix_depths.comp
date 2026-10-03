@@ -27,12 +27,6 @@ layout(set = 0, binding = 3) buffer VisibleCount {
     uint visible_ele_count;
 };
 
-layout(set = 0, binding = 4) buffer IndirectDraw {
-    uint vertex_count;
-    uint instance_count;
-    uint first_vertex;
-    uint first_instance;
-};
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
@@ -57,7 +51,7 @@ void main() {
     vec4 p_clip = V_P * centroids[i];
 
     float max_scale = max(scales[i].x, max(scales[i].y, scales[i].z));
-    float splat_extent = max_scale * 4.0;
+    float splat_extent = max_scale * 4.5;
 
     float pad_x = splat_extent * abs(proj[0][0]);
     float pad_y = splat_extent * abs(proj[1][1]);
@@ -87,7 +81,4 @@ void main() {
         g_elements_in[packed_global_idx].z = z;
     }
 
-    if (gl_LocalInvocationID == uvec3(0, 0, 0)) {// dont know why it doesnt work with gl_globalinvocationid
-        instance_count = visible_ele_count;
-    }
 }
