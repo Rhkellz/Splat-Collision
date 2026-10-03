@@ -279,16 +279,29 @@ void VulkanEngine::init_descriptors()
 		vkDestroyDescriptorSetLayout(_context.device, _splat_indicies_descriptor_layout, nullptr);
 		});
 
-	{
+	{// radix sort
 		DescriptorLayoutBuilder builder;
 		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // elements in
 		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // histograms
 		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // elements out
-		compute_descriptor_layout = builder.build(_context.device, VK_SHADER_STAGE_COMPUTE_BIT);
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // visible elements
+		_compute_rdx_descriptor_layout = builder.build(_context.device, VK_SHADER_STAGE_COMPUTE_BIT);
 	}
 
 	_main_deletion_queue.push_function([&]() {
-		vkDestroyDescriptorSetLayout(_context.device, compute_descriptor_layout, nullptr);
+		vkDestroyDescriptorSetLayout(_context.device, _compute_rdx_descriptor_layout, nullptr);
+		});
+
+	{// radix compute depths
+		DescriptorLayoutBuilder builder;
+		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // centroid data
+		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // rdx_buffers[0], "elements in"
+		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // visible elements
+		_compute_rdx_depths_descriptor_layout = builder.build(_context.device, VK_SHADER_STAGE_COMPUTE_BIT);
+	}
+
+	_main_deletion_queue.push_function([&]() {
+		vkDestroyDescriptorSetLayout(_context.device, _compute_rdx_depths_descriptor_layout, nullptr);
 		});
 
 	{
@@ -379,18 +392,43 @@ void VulkanEngine::init_default_data() {
 
 void VulkanEngine::init_splats() {
 
-	scene = loadPly("assets/bug.ply");
+	scene = loadPly("assets/bee.ply");
 	std::cout << scene.splats.size() << " total splats" << std::endl;
 	
-	AllocatedBuffer splat_buffer = vkutil::create_buffer(_context, sizeof(gaussian_splat) * scene.splats.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	std::vector<glm::vec4> centroid_vec(scene.splats.size());
+	for (size_t i = 0; i < scene.splats.size(); ++i) {
+		centroid_vec[i] = glm::vec4(scene.splats[i].centroid, 1.0f);
+	}
+
+	VkDeviceSize splat_bytes = sizeof(gaussian_splat) * scene.splats.size();
+	VkDeviceSize centroid_bytes = sizeof(glm::vec4) * scene.splats.size();
+
+	splat_buffer = vkutil::create_buffer(_context, splat_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+	 
+	splat_centroids = vkutil::create_buffer(_context, centroid_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 
 	_main_deletion_queue.push_function([=]() {
 		vkutil::destroy_buffer(_context, splat_buffer);
+		vkutil::destroy_buffer(_context, splat_centroids);
 		});
 
-	memcpy(splat_buffer.info.pMappedData, scene.splats.data(), sizeof(gaussian_splat) * scene.splats.size());
+	AllocatedBuffer staging_buffer = vkutil::create_buffer(_context, splat_bytes + centroid_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);// ram memory
 
-	splat_set = global_descriptor_allocator.allocate(_context.device, _splat_data_descriptor_layout);
+	uint8_t* mapped = static_cast<uint8_t*>(staging_buffer.info.pMappedData);
+	memcpy(mapped, scene.splats.data(), splat_bytes);
+	memcpy(mapped + splat_bytes, centroid_vec.data(), centroid_bytes);
+
+	immediate_submit([&](VkCommandBuffer cmd) {
+		VkBufferCopy copy_splats{ 0, 0, splat_bytes };
+		vkCmdCopyBuffer(cmd, staging_buffer.buffer, splat_buffer.buffer, 1, &copy_splats);
+
+		VkBufferCopy copy_centroids{ splat_bytes, 0, centroid_bytes };
+		vkCmdCopyBuffer(cmd, staging_buffer.buffer, splat_centroids.buffer, 1, &copy_centroids);
+		});
+
+	vkutil::destroy_buffer(_context, staging_buffer);
+
+	splat_set = global_descriptor_allocator.allocate(_context.device, _splat_data_descriptor_layout);// clean this stuff up
 
 	DescriptorWriter writer;
 	writer.write_buffer(0, splat_buffer.buffer, sizeof(gaussian_splat) * scene.splats.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
@@ -399,20 +437,31 @@ void VulkanEngine::init_splats() {
 	depths.resize(scene.splats.size());
 
 	// radix stuff 
-	radix_buffers[0] = vkutil::create_buffer(_context, sizeof(SplatDepth) * depths.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+
+	// Our splat data gets too big for the CPU_TO_GPU Heap 2 / host visible VRAM, so we use use regular VRAM and a staging buffer to upload
+	rdx_buffers[0] = vkutil::create_buffer(_context, sizeof(SplatDepth) * depths.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 	_main_deletion_queue.push_function([=]() {
-		vkutil::destroy_buffer(_context, radix_buffers[0]);
+		vkutil::destroy_buffer(_context, rdx_buffers[0]);
 		});
 
-	radix_buffers[1] = vkutil::create_buffer(_context, sizeof(SplatDepth) * depths.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	rdx_buffers[1] = vkutil::create_buffer(_context, sizeof(SplatDepth) * depths.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 	_main_deletion_queue.push_function([=]() {
-		vkutil::destroy_buffer(_context, radix_buffers[1]);
+		vkutil::destroy_buffer(_context, rdx_buffers[1]);
 		});
 
-	radix_count_buffer = vkutil::create_buffer(_context, sizeof(uint32_t) * 256, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);// maybe just gpu
+	rdx_count_buffer = vkutil::create_buffer(_context, sizeof(uint32_t) * 256 * num_workgroups, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 	_main_deletion_queue.push_function([=]() {
-		vkutil::destroy_buffer(_context, radix_count_buffer);
+		vkutil::destroy_buffer(_context, rdx_count_buffer);
 		});
+
+	visible_ele_buffer = vkutil::create_buffer(_context, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	_main_deletion_queue.push_function([=]() {
+		vkutil::destroy_buffer(_context, visible_ele_buffer);
+		});
+
+	uint32_t zero_cnt = 0;
+	memcpy(visible_ele_buffer.allocation->GetMappedData(), &zero_cnt, sizeof(uint32_t));
+
 }
 
 void VulkanEngine::run()
@@ -519,7 +568,7 @@ void VulkanEngine::run()
 			ImGui::Text("Frame Time: %d", frame_time);
 			ImGui::SliderFloat("Min Opacity", &min_opacity, 0.0001, 1.0);
 			ImGui::SliderFloat("Scroll Sensitivity", &scroll_sensitivity, 0.02, 1.0);
-			ImGui::SliderFloat("Near Clipping", &clipping_plane, 0.05, 10.0);
+			ImGui::SliderFloat("Near Clipping", &clipping_plane, 0.05, 50.0);
 			ImGui::InputInt("Radix Sort Work Groups", &num_workgroups);
 			ImGui::ColorEdit3("Background Color", clear_color.float32, ImGuiColorEditFlags_NoInputs);
 		}
@@ -577,7 +626,7 @@ void VulkanEngine::draw() {
 	.dstStageMask = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT,
 	.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
 
-	.buffer = radix_buffers[1].buffer,
+	.buffer = rdx_buffers[1].buffer,
 	.offset = 0,
 	.size = sizeof(SplatDepth) * depths.size()
 	};
@@ -691,14 +740,18 @@ void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
 	// compute this stuff early so we know what z to use
 	cam_pos_cartesian = glm::vec3{ rad * sin(phi) * cos(theta), rad * cos(phi), rad * sin(phi) * sin(theta) } + center;
 	view = glm::lookAt(cam_pos_cartesian, center, glm::vec3(0, 1, 0));
+	proj = glm::perspective(glm::radians(70.f), (float)_draw_extent.width / (float)_draw_extent.height, clipping_plane, 10000.f);
 
-	glm::vec4 view_row_z = glm::vec4(view[0][2], view[1][2], view[2][2], view[3][2]);
-	for (uint32_t i = 0; i < scene.splats.size(); ++i) {
-		float z = glm::dot(view_row_z, glm::vec4(scene.splats[i].centroid, 1.0f));
-		depths[i] = { i, z };
+	VkDescriptorSet depths_descriptor = get_current_frame()._frame_descriptors.allocate(_context.device, _compute_rdx_depths_descriptor_layout);
+	{
+		DescriptorWriter writer;
+		writer.write_buffer(0, splat_centroids.buffer, sizeof(glm::vec4) * scene.splats.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // centroid data
+		writer.write_buffer(1, rdx_buffers[0].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // rdx_buffers[0]
+		writer.write_buffer(2, visible_ele_buffer.buffer, sizeof(uint32_t), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // visible elements
+		writer.update_set(_context.device, depths_descriptor);
 	}
-	// TODO: only sort splats within view frustum (one compute shader testing each splat)
-	memcpy(radix_buffers[0].allocation->GetMappedData(), depths.data(), sizeof(SplatDepth) * depths.size());
+
+	RadixDepthsPC depth_pc = {view, proj, clipping_plane};
 
 	uint32_t WORKGROUP_SIZE = 256;
 	uint32_t num_elements = static_cast<uint32_t>(depths.size());
@@ -707,103 +760,148 @@ void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
 	uint32_t num_blocks_per_workgroup = (elements_per_workgroup + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
 
 
-	VkDescriptorSet radix_descriptor_even = get_current_frame()._frame_descriptors.allocate(_context.device, compute_descriptor_layout);
+	VkDescriptorSet radix_descriptor_even = get_current_frame()._frame_descriptors.allocate(_context.device, _compute_rdx_descriptor_layout);
 	{
 		DescriptorWriter writer;
-		writer.write_buffer(0, radix_buffers[0].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // in
-		writer.write_buffer(1, radix_count_buffer.buffer, sizeof(uint32_t) * 256 * num_workgroups, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // histograms
-		writer.write_buffer(2, radix_buffers[1].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // out
+		writer.write_buffer(0, rdx_buffers[0].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // in
+		writer.write_buffer(1, rdx_count_buffer.buffer, sizeof(uint32_t) * 256 * num_workgroups, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // histograms
+		writer.write_buffer(2, rdx_buffers[1].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // out
+		writer.write_buffer(3, visible_ele_buffer.buffer, sizeof(uint32_t), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // visible elements
 		writer.update_set(_context.device, radix_descriptor_even);
 	}
 
-	VkDescriptorSet radix_descriptor_odd = get_current_frame()._frame_descriptors.allocate(_context.device, compute_descriptor_layout);
+	VkDescriptorSet radix_descriptor_odd = get_current_frame()._frame_descriptors.allocate(_context.device, _compute_rdx_descriptor_layout);
 	{
 		DescriptorWriter writer;
-		writer.write_buffer(0, radix_buffers[1].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // in
-		writer.write_buffer(1, radix_count_buffer.buffer, sizeof(uint32_t) * 256 * num_workgroups, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // histograms
-		writer.write_buffer(2, radix_buffers[0].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // out
+		writer.write_buffer(0, rdx_buffers[1].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // in
+		writer.write_buffer(1, rdx_count_buffer.buffer, sizeof(uint32_t) * 256 * num_workgroups, 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // histograms
+		writer.write_buffer(2, rdx_buffers[0].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // out
+		writer.write_buffer(3, visible_ele_buffer.buffer, sizeof(uint32_t), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // visible elements
 		writer.update_set(_context.device, radix_descriptor_odd);
 	}
 
-	immediate_submit([&](VkCommandBuffer imm_cmd) {
+	immediate_submit([&](VkCommandBuffer imm_cmd) {// immediate submit probably not optimal
+
+		vkCmdFillBuffer(imm_cmd, visible_ele_buffer.buffer, 0, sizeof(uint32_t), 0);
+
+		{
+			VkMemoryBarrier2 barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // make sure visible_ele_count is zeroed before depths shader accumulates into it
+			barrier.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+			barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+			barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+			barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+
+			VkDependencyInfo dep{ .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+			dep.memoryBarrierCount = 1;
+			dep.pMemoryBarriers = &barrier;
+			vkCmdPipelineBarrier2(imm_cmd, &dep);
+		}
+
+		dispatch_rdx_depths(depths_descriptor, imm_cmd, depth_pc, (scene.splats.size() + 256 - 1) / 256);
+
+		{
+			VkMemoryBarrier2 barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // make sure we dont start sorting until depths is filled
+			barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+			barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+			barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+			barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+
+			VkDependencyInfo dep{ .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+			dep.memoryBarrierCount = 1;
+			dep.pMemoryBarriers = &barrier;
+			vkCmdPipelineBarrier2(imm_cmd, &dep);
+		}
+
 		for (uint32_t pass = 0; pass < 4; pass++) { // 4 passes, 8 bits per pass = uint32_t
 			VkDescriptorSet radix_descriptor = (pass % 2 == 0) ? radix_descriptor_even : radix_descriptor_odd;
 
-			vkCmdFillBuffer(imm_cmd, radix_count_buffer.buffer, 0, VK_WHOLE_SIZE, 0);
+			vkCmdFillBuffer(imm_cmd, rdx_count_buffer.buffer, 0, VK_WHOLE_SIZE, 0);
 
-			VkMemoryBarrier2 fill_barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // make sure we don't dispatch before zero-initializing count buffer
-			fill_barrier.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
-			fill_barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-			fill_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-			fill_barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+			{
+				VkMemoryBarrier2 barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // make sure we don't dispatch before zero-initializing count buffer
+				barrier.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+				barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+				barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+				barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
 
-			VkDependencyInfo fill_dep{ .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-			fill_dep.memoryBarrierCount = 1;
-			fill_dep.pMemoryBarriers = &fill_barrier;
-			vkCmdPipelineBarrier2(imm_cmd, &fill_dep);
+				VkDependencyInfo dep{ .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+				dep.memoryBarrierCount = 1;
+				dep.pMemoryBarriers = &barrier;
+				vkCmdPipelineBarrier2(imm_cmd, &dep);
+			}
 
-			RadixPushConstants pc = { depths.size(), pass * 8, num_workgroups, num_blocks_per_workgroup};
+			RadixSortPC pc = { depths.size(), pass * 8, num_workgroups, num_blocks_per_workgroup};
 
 			dispatch_rdx_histogram(radix_descriptor, imm_cmd, pc);
 
-			fill_barrier = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // don't read in scan shader until histogram writes are done
-			fill_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-			fill_barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-			fill_barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-			fill_barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+			{
+				VkMemoryBarrier2 barrier = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // don't read in scan shader until histogram writes are done
+				barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+				barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+				barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+				barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
 
-			fill_dep = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-			fill_dep.memoryBarrierCount = 1;
-			fill_dep.pMemoryBarriers = &fill_barrier;
-			vkCmdPipelineBarrier2(imm_cmd, &fill_dep);
+				VkDependencyInfo dep = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+				dep.memoryBarrierCount = 1;
+				dep.pMemoryBarriers = &barrier;
+				vkCmdPipelineBarrier2(imm_cmd, &dep);
+			}
 
 			dispatch_rdx_scan_scat(radix_descriptor, imm_cmd, pc);
 
-			fill_barrier = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // don't zero count buffer (next pass) until scatter is done reading it, and don't read scattered output until scatter writes are done
-			fill_barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-			fill_barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
-			fill_barrier.dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-			fill_barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT;
+			{
+				VkMemoryBarrier2 barrier = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // don't zero count buffer (next pass) until scatter is done reading it, and don't read scattered output until scatter writes are done
+				barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+				barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+				barrier.dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+				barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT;
 
-			fill_dep = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-			fill_dep.memoryBarrierCount = 1;
-			fill_dep.pMemoryBarriers = &fill_barrier;
-			vkCmdPipelineBarrier2(imm_cmd, &fill_dep);
+				VkDependencyInfo dep = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+				dep.memoryBarrierCount = 1;
+				dep.pMemoryBarriers = &barrier;
+				vkCmdPipelineBarrier2(imm_cmd, &dep);
+			}
 
 			final_rdx_buffer_idx = (pass % 2 == 0) ? 1 : 0;
 		}
 		});
 }
 
-void VulkanEngine::dispatch_rdx_histogram(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixPushConstants pc) {
+void VulkanEngine::dispatch_rdx_histogram(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixSortPC pc) {
 
 	vkCmdBindPipeline(imm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _rdx_histogram_pipeline);
-	vkCmdBindDescriptorSets(imm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _compute_pipeline_layout, 0, 1, &radix_descriptor, 0, nullptr);
-	vkCmdPushConstants(imm_cmd, _compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RadixPushConstants), &pc);
+	vkCmdBindDescriptorSets(imm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _compute_rdx_pipeline_layout, 0, 1, &radix_descriptor, 0, nullptr);
+	vkCmdPushConstants(imm_cmd, _compute_rdx_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RadixSortPC), &pc);
 	vkCmdDispatch(imm_cmd, pc.num_workgroups, 1, 1);
 }
 
-void VulkanEngine::dispatch_rdx_scan_scat(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixPushConstants pc) {
+void VulkanEngine::dispatch_rdx_scan_scat(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixSortPC pc) {
 
 	vkCmdBindPipeline(imm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _rdx_scan_scat_pipeline);
-	vkCmdBindDescriptorSets(imm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _compute_pipeline_layout, 0, 1, &radix_descriptor, 0, nullptr);
-	vkCmdPushConstants(imm_cmd, _compute_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RadixPushConstants), &pc);
+	vkCmdBindDescriptorSets(imm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _compute_rdx_pipeline_layout, 0, 1, &radix_descriptor, 0, nullptr);
+	vkCmdPushConstants(imm_cmd, _compute_rdx_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RadixSortPC), &pc);
 	vkCmdDispatch(imm_cmd, pc.num_workgroups, 1, 1); // single workgroup of 256 threads covers all 256 buckets
+}
+
+void VulkanEngine::dispatch_rdx_depths(VkDescriptorSet depths_descriptor, VkCommandBuffer imm_cmd, RadixDepthsPC depth_pc, int dispatch_size) {
+	vkCmdBindPipeline(imm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _rdx_compute_depths_pipeline);
+	vkCmdBindDescriptorSets(imm_cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _compute_depths_pipeline_layout, 0, 1, &depths_descriptor, 0, nullptr);
+	vkCmdPushConstants(imm_cmd, _compute_depths_pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(RadixDepthsPC), &depth_pc);
+	vkCmdDispatch(imm_cmd, dispatch_size, 1, 1);
 }
 
 
 void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
-	glm::mat4 projection = glm::perspective(glm::radians(70.f), (float)_draw_extent.width / (float)_draw_extent.height, clipping_plane, 10000.f);// should fix arbitrary val
-	float focalX = std::abs(projection[0][0]) * (screen_width * 0.5f);
-	float focalY = std::abs(projection[1][1]) * (screen_height * 0.5f);
-	projection[1][1] *= -1;
+	float focalX = std::abs(proj[0][0]) * (screen_width * 0.5f);
+	float focalY = std::abs(proj[1][1]) * (screen_height * 0.5f);
+	proj[1][1] *= -1;
 
 	AllocatedBuffer uniform_buffer = get_current_frame()._GPU_scene_data_buffer;
 	GPUSceneData* scene_uniform_data = (GPUSceneData*)uniform_buffer.allocation->GetMappedData();
 	scene_data.camera_pos = glm::vec4(cam_pos_cartesian, 0);
 	scene_data.screen_size = { screen_width, screen_height };
 	scene_data.view_matrix = view;
-	scene_data.proj_matrix = projection;
+	scene_data.proj_matrix = proj;
 	*scene_uniform_data = scene_data;
 
 	VkDescriptorSet global_descriptor = get_current_frame()._frame_descriptors.allocate(_context.device, _gpu_scene_data_descriptor_layout);
@@ -817,7 +915,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 	VkDescriptorSet sorted_descriptor = get_current_frame()._frame_descriptors.allocate(_context.device, _splat_indicies_descriptor_layout);
 	{
 		DescriptorWriter writer;
-		writer.write_buffer(0, radix_buffers[final_rdx_buffer_idx].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
+		writer.write_buffer(0, rdx_buffers[final_rdx_buffer_idx].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER);
 		writer.update_set(_context.device, sorted_descriptor);
 	}
 
@@ -979,56 +1077,91 @@ void VulkanEngine::init_splat_pipeline() {
 void VulkanEngine::init_compute_pipelines() {
 	std::string rdx_histogram_path = "shaders/radix_histogram.comp.spv";
 	std::string rdx_scan_scat_path = "shaders/radix_scan_scat.comp.spv";
+	std::string rdx_depths_path = "shaders/radix_depths.comp.spv";
 
 	VkShaderModule rdx_histogram_shader;
 	VkShaderModule rdx_scan_scat_shader;
+	VkShaderModule rdx_depths_shader;
 
 	if (!vkutil::load_shader_module(rdx_histogram_path.c_str(), _context.device, &rdx_histogram_shader)) {
 		throw std::runtime_error("Failed to load radix histogram shader");
 	}
 
 	if (!vkutil::load_shader_module(rdx_scan_scat_path.c_str(), _context.device, &rdx_scan_scat_shader)) {
-		throw std::runtime_error("Failed to load radix scan shader");
+		throw std::runtime_error("Failed to load radix scan/scatter shader");
 	}
 
-	VkPushConstantRange buffer_range{};
-	buffer_range.offset = 0;
-	buffer_range.size = sizeof(RadixPushConstants);
-	buffer_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	if (!vkutil::load_shader_module(rdx_depths_path.c_str(), _context.device, &rdx_depths_shader)) {
+		throw std::runtime_error("Failed to load radix depths shader");
+	}
 
-	VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
-	VkDescriptorSetLayout layouts[] = { compute_descriptor_layout };
+	// radix histogram and scan_scat pipeline layout
+	{
+		VkPushConstantRange buffer_range{};
+		buffer_range.offset = 0;
+		buffer_range.size = sizeof(RadixSortPC);
+		buffer_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-	pipeline_layout_info.pPushConstantRanges = &buffer_range;
-	pipeline_layout_info.pushConstantRangeCount = 1;
-	pipeline_layout_info.pSetLayouts = layouts;
-	pipeline_layout_info.setLayoutCount = 1;
-	VK_CHECK(vkCreatePipelineLayout(_context.device, &pipeline_layout_info, nullptr, &_compute_pipeline_layout));
+		VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
+		VkDescriptorSetLayout layouts[] = { _compute_rdx_descriptor_layout };
 
+		pipeline_layout_info.pPushConstantRanges = &buffer_range;
+		pipeline_layout_info.pushConstantRangeCount = 1;
+		pipeline_layout_info.pSetLayouts = layouts;
+		pipeline_layout_info.setLayoutCount = 1;
+		VK_CHECK(vkCreatePipelineLayout(_context.device, &pipeline_layout_info, nullptr, &_compute_rdx_pipeline_layout));
+	}
+
+	//radix depths pipeline layout
+	{
+		VkPushConstantRange buffer_range{};
+		buffer_range.offset = 0;
+		buffer_range.size = sizeof(RadixDepthsPC);
+		buffer_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+		VkPipelineLayoutCreateInfo pipeline_layout_info = vkinit::pipeline_layout_create_info();
+		VkDescriptorSetLayout layouts[] = { _compute_rdx_depths_descriptor_layout };
+
+		pipeline_layout_info.pPushConstantRanges = &buffer_range;
+		pipeline_layout_info.pushConstantRangeCount = 1;
+		pipeline_layout_info.pSetLayouts = layouts;
+		pipeline_layout_info.setLayoutCount = 1;
+		VK_CHECK(vkCreatePipelineLayout(_context.device, &pipeline_layout_info, nullptr, &_compute_depths_pipeline_layout));
+	}
 	// finally build the pipelines
 
 	{
 		ComputePipelineBuilder comp_builder;
 		comp_builder.set_shader(rdx_histogram_shader);
-		comp_builder.set_layout(_compute_pipeline_layout);
+		comp_builder.set_layout(_compute_rdx_pipeline_layout);
 		_rdx_histogram_pipeline = comp_builder.build_pipeline(_context.device);
 	}
 
 	{
 		ComputePipelineBuilder comp_builder;
 		comp_builder.set_shader(rdx_scan_scat_shader);
-		comp_builder.set_layout(_compute_pipeline_layout);
+		comp_builder.set_layout(_compute_rdx_pipeline_layout);
 		_rdx_scan_scat_pipeline = comp_builder.build_pipeline(_context.device);
+	}
+
+	{
+		ComputePipelineBuilder comp_builder;
+		comp_builder.set_shader(rdx_depths_shader);
+		comp_builder.set_layout(_compute_depths_pipeline_layout);
+		_rdx_compute_depths_pipeline = comp_builder.build_pipeline(_context.device);
 	}
 
 	// clean structures
 	vkDestroyShaderModule(_context.device, rdx_histogram_shader, nullptr);
 	vkDestroyShaderModule(_context.device, rdx_scan_scat_shader, nullptr);
+	vkDestroyShaderModule(_context.device, rdx_depths_shader, nullptr);
 
 	_main_deletion_queue.push_function([&]() {
-		vkDestroyPipelineLayout(_context.device, _compute_pipeline_layout, nullptr);
+		vkDestroyPipelineLayout(_context.device, _compute_rdx_pipeline_layout, nullptr);
+		vkDestroyPipelineLayout(_context.device, _compute_depths_pipeline_layout, nullptr);
 		vkDestroyPipeline(_context.device, _rdx_histogram_pipeline, nullptr);
 		vkDestroyPipeline(_context.device, _rdx_scan_scat_pipeline, nullptr);
+		vkDestroyPipeline(_context.device, _rdx_compute_depths_pipeline, nullptr);
 		});
 }
 

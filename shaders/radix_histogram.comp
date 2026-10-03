@@ -13,7 +13,7 @@ layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 const uint RADIX_SORT_BINS = 256;
 
 layout(push_constant) uniform PushConstants {
-    uint num_elements;
+    uint num_elements; // kept for reference/fallback, no longer used for bounds
     uint shift;
     uint num_workgroups;
     uint num_blocks_per_workgroup;
@@ -27,6 +27,10 @@ layout(set = 0, binding = 1) buffer Histograms {
     uint g_histograms[]; // size = RADIX_SORT_BINS * num_workgroups
 };
 
+layout(set = 0, binding = 3) buffer VisibleCount {
+    uint visible_ele_count;
+};
+
 shared uint histogram[256];
 
 uint float_to_sortable_uint(float f) {
@@ -34,17 +38,21 @@ uint float_to_sortable_uint(float f) {
 }
 
 void main() {
+    uint workgroup_start = gl_WorkGroupID.x * pc.num_blocks_per_workgroup * WORKGROUP_SIZE;
+
     if (gl_LocalInvocationID.x < RADIX_SORT_BINS) {
         histogram[gl_LocalInvocationID.x] = 0U;
     }
     barrier();
 
-    for (uint index = 0; index < pc.num_blocks_per_workgroup; index++) {
-        uint elementId = gl_WorkGroupID.x * pc.num_blocks_per_workgroup * WORKGROUP_SIZE + index * WORKGROUP_SIZE + gl_LocalInvocationID.x;
-        if (elementId < pc.num_elements) {
-            uint z = float_to_sortable_uint(g_elements_in[elementId].z);
-            uint bin = (z >> pc.shift) & (RADIX_SORT_BINS - 1);
-            atomicAdd(histogram[bin], 1U);
+    if (workgroup_start < visible_ele_count) {
+        for (uint index = 0; index < pc.num_blocks_per_workgroup; index++) {
+            uint elementId = workgroup_start + index * WORKGROUP_SIZE + gl_LocalInvocationID.x;
+            if (elementId < visible_ele_count) {
+                uint z = float_to_sortable_uint(g_elements_in[elementId].z);
+                uint bin = (z >> pc.shift) & (RADIX_SORT_BINS - 1);
+                atomicAdd(histogram[bin], 1U);
+            }
         }
     }
     barrier();

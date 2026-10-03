@@ -33,6 +33,10 @@ layout(set = 0, binding = 1) buffer Histograms {
     uint g_histograms[];
 };
 
+layout(set = 0, binding = 3) buffer VisibleCount {
+    uint visible_ele_count;
+};
+
 shared uint sums[RADIX_SORT_BINS / SUBGROUP_SIZE];
 shared uint global_offsets[RADIX_SORT_BINS];
 
@@ -93,7 +97,7 @@ void main() {
         SplatDepth element_in;
         uint binID = 0;
         uint binOffset = 0;
-        bool valid = elementId < pc.num_elements;
+        bool valid = elementId < visible_ele_count;
         if (valid) {
             element_in = g_elements_in[elementId];
             uint z = float_to_sortable_uint(element_in.z);

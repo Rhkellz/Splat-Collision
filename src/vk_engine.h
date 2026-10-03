@@ -18,13 +18,18 @@
 constexpr unsigned int FRAME_OVERLAP = 2;
 
 struct SplatDepth { uint32_t index; float z; };
-struct RadixPushConstants {
+struct RadixSortPC {
 	uint32_t num_elements;
 	uint32_t shift;              // pass * 8
 	uint32_t num_workgroups;
 	uint32_t num_blocks_per_workgroup;
 };
 
+struct RadixDepthsPC {
+	glm::mat4 view;
+	glm::mat4 proj;
+	float near_plane;
+};
 struct FrameData {
 	VkSemaphore _swapchain_semaphore;
 	VkFence _render_fence;
@@ -79,30 +84,29 @@ public:
 
 	bool stop_rendering{ false };
 
-	DescriptorAllocator global_descriptor_allocator;
-
-
-	VkPipeline _rdx_histogram_pipeline;
-	VkPipeline _rdx_scan_scat_pipeline;
-	VkPipelineLayout _compute_pipeline_layout;
-
 	VkFence _imm_fence;
 	VkCommandBuffer _imm_command_buffer;
 	VkCommandPool _imm_command_pool;
 
-	VkPipelineLayout _splat_pipeline_layout;
+	DescriptorAllocator global_descriptor_allocator;
+
 	VkPipeline _splat_pipeline;
+	VkPipeline _rdx_histogram_pipeline;
+	VkPipeline _rdx_scan_scat_pipeline;
+	VkPipeline _rdx_compute_depths_pipeline;
 
-
-	bool resize_requested;
-
-	GPUSceneData scene_data;
+	VkPipelineLayout _compute_rdx_pipeline_layout;
+	VkPipelineLayout _compute_depths_pipeline_layout;
+	VkPipelineLayout _splat_pipeline_layout;
 
 	VkDescriptorSetLayout _splat_data_descriptor_layout;
 	VkDescriptorSetLayout _gpu_scene_data_descriptor_layout;
 	VkDescriptorSetLayout _splat_indicies_descriptor_layout;
+	VkDescriptorSetLayout _compute_rdx_descriptor_layout;
+	VkDescriptorSetLayout _compute_rdx_depths_descriptor_layout;
 
-	VkDescriptorSetLayout compute_descriptor_layout;
+	bool resize_requested;
+	GPUSceneData scene_data;
 
 	VkClearColorValue clear_color;
 
@@ -129,10 +133,15 @@ public:
 
 	Scene scene;
 
-	AllocatedBuffer radix_buffers[2];
-	AllocatedBuffer radix_count_buffer;
+	AllocatedBuffer splat_buffer;
+	AllocatedBuffer splat_centroids;
+
+	AllocatedBuffer rdx_buffers[2];
+	AllocatedBuffer rdx_count_buffer;
+	AllocatedBuffer visible_ele_buffer;
 
 	glm::mat4 view;
+	glm::mat4 proj;
 	glm::vec3 cam_pos_cartesian;
 	std::vector<SplatDepth> depths;
 	int final_rdx_buffer_idx = 0;
@@ -173,9 +182,9 @@ private:
 
 	void resize_draw_images();
 
-	void dispatch_rdx_histogram(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixPushConstants pc);
+	void dispatch_rdx_histogram(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixSortPC pc);
 
-	void dispatch_rdx_scan_scat(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixPushConstants pc);
+	void dispatch_rdx_scan_scat(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixSortPC pc);
 
-
+	void dispatch_rdx_depths(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixDepthsPC pc, int dispatch_size);
 };

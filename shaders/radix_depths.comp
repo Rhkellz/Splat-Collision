@@ -1,0 +1,84 @@
+#version 450
+
+struct SplatDepth {
+    uint index;
+    float z;
+};
+
+layout(push_constant) uniform PushConstants {
+    mat4 view;
+    mat4 proj;
+    float near_plane;
+};
+
+layout(set = 0, binding = 0) buffer Centroids {
+    vec4 centroids[];
+};
+
+layout(set = 0, binding = 1) buffer ElementsIn {
+    SplatDepth g_elements_in[];
+};
+
+layout(set = 0, binding = 2) buffer VisibleCount {
+    uint visible_ele_count;
+};
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+shared uint visible_shared;
+shared uint group_base_offset;
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    
+    if (gl_LocalInvocationID.x == 0) {
+        visible_shared = 0;
+    }
+    barrier();
+
+    bool is_visible = false;
+    float z = 0.0;
+    uint local_idx = 0;
+
+    if (i < centroids.length()) {
+    // Note: If V_P is static per-frame, pass it in via push constants 
+    // rather than doing mat4 multiplication per-thread!
+    mat4 V_P = proj * view; 
+    vec4 p_clip = V_P * centroids[i];
+
+    // Vulkan Frustum Bounds:
+    // 1. w > 0.0       -> Splat is strictly in front of the camera
+    // 2. z >= 0.0      -> Splat is past the Vulkan near plane (0.0 to w)
+    // 3. z <= w        -> Splat is before the far plane
+    // 4. abs(x, y) <= w -> Splat is within the left/right/top/bottom planes
+    
+    if (p_clip.w > 0.0 && 
+        p_clip.z >= 0.0 && 
+        p_clip.z <= p_clip.w &&
+        abs(p_clip.x) <= p_clip.w && 
+        abs(p_clip.y) <= p_clip.w) {
+        
+        is_visible = true;
+        local_idx = atomicAdd(visible_shared, 1);
+        
+        // For standard perspective matrices, p_clip.w is EXACTLY your linear 
+        // view-space depth. You can use it directly for sorting instead of 
+        // a second dot product, avoiding the view_row_2 calculation entirely.
+        z = p_clip.w; 
+    }
+}
+    barrier();
+
+  
+    if (gl_LocalInvocationID.x == 0 && visible_shared > 0) {
+        group_base_offset = atomicAdd(visible_ele_count, visible_shared);
+    }
+    barrier();
+
+    if (is_visible) {
+        uint packed_global_idx = group_base_offset + local_idx;
+        
+        g_elements_in[packed_global_idx].index = i;
+        g_elements_in[packed_global_idx].z = z;
+    }
+}
