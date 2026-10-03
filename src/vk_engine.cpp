@@ -297,6 +297,7 @@ void VulkanEngine::init_descriptors()
 		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // centroid data
 		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // rdx_buffers[0], "elements in"
 		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // visible elements
+		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // indirect draw
 		_compute_rdx_depths_descriptor_layout = builder.build(_context.device, VK_SHADER_STAGE_COMPUTE_BIT);
 	}
 
@@ -462,6 +463,18 @@ void VulkanEngine::init_splats() {
 	uint32_t zero_cnt = 0;
 	memcpy(visible_ele_buffer.allocation->GetMappedData(), &zero_cnt, sizeof(uint32_t));
 
+	// indirect draw/dispatch buffers
+	VkDrawIndirectCommand empty_indirect_draw = { 4, 0, 0, 0 };// careful, 4 hardcoded vertices (quad)
+	indirect_draw_buffer = vkutil::create_buffer(_context, sizeof(VkDrawIndirectCommand), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU); //todo: gpu only
+	_main_deletion_queue.push_function([=]() {
+		vkutil::destroy_buffer(_context, indirect_draw_buffer);
+		});
+	memcpy(indirect_draw_buffer.allocation->GetMappedData(), &empty_indirect_draw, sizeof(VkDrawIndirectCommand));
+
+	indirect_dispatch_buffer = vkutil::create_buffer(_context, sizeof(VkDispatchIndirectCommand), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU); //todo: gpu only
+	_main_deletion_queue.push_function([=]() {
+		vkutil::destroy_buffer(_context, indirect_dispatch_buffer);
+		});
 }
 
 void VulkanEngine::run()
@@ -748,6 +761,7 @@ void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
 		writer.write_buffer(0, splat_centroids.buffer, sizeof(glm::vec4) * scene.splats.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // centroid data
 		writer.write_buffer(1, rdx_buffers[0].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // rdx_buffers[0]
 		writer.write_buffer(2, visible_ele_buffer.buffer, sizeof(uint32_t), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // visible elements
+		writer.write_buffer(3, indirect_draw_buffer.buffer, sizeof(VkDrawIndirectCommand), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // indirect draw
 		writer.update_set(_context.device, depths_descriptor);
 	}
 
@@ -931,7 +945,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 	push_constants.min_opacty = min_opacity;
 	vkCmdPushConstants(cmd, _splat_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(GPUDrawPushConstants), &push_constants);
 
-	vkCmdDraw(cmd, 4, scene.splats.size(), 0, 0);
+	vkCmdDrawIndirect(cmd, indirect_draw_buffer.buffer, 0, 1, 0);
 }
 
 
