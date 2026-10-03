@@ -15,15 +15,19 @@ layout(set = 0, binding = 0) buffer Centroids {
     vec4 centroids[];
 };
 
-layout(set = 0, binding = 1) buffer ElementsIn {
+layout(set = 0, binding = 1) buffer Scales {
+    vec4 scales[];
+};
+
+layout(set = 0, binding = 2) buffer ElementsIn {
     SplatDepth g_elements_in[];
 };
 
-layout(set = 0, binding = 2) buffer VisibleCount {
+layout(set = 0, binding = 3) buffer VisibleCount {
     uint visible_ele_count;
 };
 
-layout(set = 0, binding = 3) buffer IndirectDraw {
+layout(set = 0, binding = 4) buffer IndirectDraw {
     uint vertex_count;
     uint instance_count;
     uint first_vertex;
@@ -52,13 +56,21 @@ void main() {
     mat4 V_P = proj * view; 
     vec4 p_clip = V_P * centroids[i];
 
+    float max_scale = max(scales[i].x, max(scales[i].y, scales[i].z));
+    float splat_extent = max_scale * 4.0;
+
+    float pad_x = splat_extent * abs(proj[0][0]);
+    float pad_y = splat_extent * abs(proj[1][1]);
+
+    if (p_clip.w + splat_extent > near_plane &&
+        abs(p_clip.x) <= p_clip.w + pad_x &&
+        abs(p_clip.y) <= p_clip.w + pad_y) {
     
-    if (p_clip.w > 0.0 && p_clip.z >= 0.0 && p_clip.z <= p_clip.w && abs(p_clip.x) <= p_clip.w && abs(p_clip.y) <= p_clip.w) {
         is_visible = true;
         local_idx = atomicAdd(visible_shared, 1);
-        
-        z = p_clip.w; 
+        z = p_clip.w;
     }
+
 }
     barrier();
 

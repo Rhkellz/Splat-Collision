@@ -1,5 +1,5 @@
 ﻿#pragma once
-
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
 #include <memory>
 #include <optional>
 #include <string>
@@ -114,4 +114,18 @@ struct GPUSceneData {
 	glm::mat4 proj_matrix;
 	glm::vec4 camera_pos;
 	glm::vec2 screen_size;
+};
+
+struct SplatDepth { uint32_t index; float z; };
+struct RadixSortPC {
+	uint32_t num_elements;
+	uint32_t shift;              // pass * 8
+	uint32_t num_workgroups;
+	uint32_t num_blocks_per_workgroup;
+};
+
+struct RadixDepthsPC {
+	glm::mat4 view;
+	glm::mat4 proj;
+	float near_plane;
 };

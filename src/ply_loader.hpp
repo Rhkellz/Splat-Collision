@@ -2,7 +2,7 @@
 
 // From https://github.com/benjamin-feldman/3dgs-weekend
 #include "splat.hpp"
-
+#include <glm/vec3.hpp>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -10,9 +10,14 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <iostream>
 
 struct Scene {
     std::vector<gaussian_splat> splats;
+    glm::vec3 average_centroid; // median is more expensive
+    float scroll_distance;
+    float scroll_sensitivity;
+    float near_plane;
 };
 
 namespace plyDetail {
@@ -216,8 +221,8 @@ inline Scene loadPly(const std::string& path) {
     const std::size_t restCountPerChannel = shRest.size() / SH_CHANNEL_COUNT;
 
     Scene result;
-    result.splats.reserve(vertexCount);
-
+    result.average_centroid = glm::vec3(0.0, 0.0, 0.0);
+    int test = 0;
     std::vector<unsigned char> row(rowStride);
     for (std::size_t i = 0; i < vertexCount; ++i) {
         file.read(reinterpret_cast<char*>(row.data()), static_cast<std::streamsize>(row.size()));
@@ -252,9 +257,22 @@ inline Scene loadPly(const std::string& path) {
         splat.rotation[2] = plyDetail::readAsFloat(row, rot2);
         splat.rotation[3] = plyDetail::readAsFloat(row, rot3);
         result.splats.push_back(splat);
+
+        result.average_centroid += splat.centroid;
     }
 
+    result.average_centroid /= result.splats.size();
+    int total_iterations = std::max(static_cast<int>(result.splats.size() / 100.0), 100);
+    result.scroll_distance = 0;
 
+    for (int i = 0; i < total_iterations; i++) {// could improve later
+        int rand_index = std::rand() % result.splats.size();
+        glm::vec3 centroid = glm::vec3(result.splats[rand_index].centroid[0], result.splats[rand_index].centroid[1], result.splats[rand_index].centroid[2]);
+        result.scroll_distance += glm::length(result.average_centroid - centroid);
+    }
 
+    result.scroll_distance /= (total_iterations * 0.5);
+    result.scroll_sensitivity = 0.06775 * std::pow(1.1649, result.scroll_distance); // simple exponential regression from desmos
+    result.near_plane = 0.06 * result.scroll_distance;
     return result;
 }

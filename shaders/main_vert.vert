@@ -79,8 +79,8 @@ void main()
     int splat_index = int(sorted_indices.indices[gl_InstanceIndex].index);
     vec3 splat_world_pos = splat_buffer.splats[splat_index].center;
 
-    vec4 clip_pos = scene_data.proj_matrix * scene_data.view_matrix * vec4(splat_world_pos, 1.0f);
     vec4 view_pos = scene_data.view_matrix * vec4(splat_world_pos, 1.0f);
+    vec4 clip_pos = scene_data.proj_matrix * view_pos;
 
     if (clip_pos.w <= 0.0 || view_pos.z >= -0.02 || scene_data.screen_size.x <= 0.0 || scene_data.screen_size.y <= 0.0) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);

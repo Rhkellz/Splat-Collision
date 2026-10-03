@@ -40,6 +40,10 @@ void VulkanEngine::init() {
 
 	init_splats();
 
+	init_radix();
+
+	init_stats();
+
 	//everything went fine
 	_is_initialized = true;
 }
@@ -295,6 +299,7 @@ void VulkanEngine::init_descriptors()
 	{// radix compute depths
 		DescriptorLayoutBuilder builder;
 		builder.add_binding(0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // centroid data
+		builder.add_binding(4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // scale data
 		builder.add_binding(1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // rdx_buffers[0], "elements in"
 		builder.add_binding(2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // visible elements
 		builder.add_binding(3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // indirect draw
@@ -392,32 +397,39 @@ void VulkanEngine::init_default_data() {
 }
 
 void VulkanEngine::init_splats() {
-
-	scene = loadPly("assets/bee.ply");
-	std::cout << scene.splats.size() << " total splats" << std::endl;
 	
+	std::cout << "Loading data..." << std::endl;
+	scene = loadPly("assets/bee.ply");
+	std::cout << scene.splats.size() << " total splats loaded" << std::endl;
+
 	std::vector<glm::vec4> centroid_vec(scene.splats.size());
+	std::vector<glm::vec4> scale_vec(scene.splats.size());
 	for (size_t i = 0; i < scene.splats.size(); ++i) {
 		centroid_vec[i] = glm::vec4(scene.splats[i].centroid, 1.0f);
+		scale_vec[i] = glm::vec4(scene.splats[i].scale[0], scene.splats[i].scale[1], scene.splats[i].scale[2], 1.0f);
 	}
 
 	VkDeviceSize splat_bytes = sizeof(gaussian_splat) * scene.splats.size();
 	VkDeviceSize centroid_bytes = sizeof(glm::vec4) * scene.splats.size();
+	VkDeviceSize scale_bytes = sizeof(glm::vec4) * scene.splats.size();
 
 	splat_buffer = vkutil::create_buffer(_context, splat_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 	 
 	splat_centroids = vkutil::create_buffer(_context, centroid_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
+	splat_scales = vkutil::create_buffer(_context, scale_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 
 	_main_deletion_queue.push_function([=]() {
 		vkutil::destroy_buffer(_context, splat_buffer);
 		vkutil::destroy_buffer(_context, splat_centroids);
+		vkutil::destroy_buffer(_context, splat_scales);
 		});
 
-	AllocatedBuffer staging_buffer = vkutil::create_buffer(_context, splat_bytes + centroid_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);// ram memory
+	AllocatedBuffer staging_buffer = vkutil::create_buffer(_context, splat_bytes + centroid_bytes + scale_bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);// ram memory
 
 	uint8_t* mapped = static_cast<uint8_t*>(staging_buffer.info.pMappedData);
 	memcpy(mapped, scene.splats.data(), splat_bytes);
 	memcpy(mapped + splat_bytes, centroid_vec.data(), centroid_bytes);
+	memcpy(mapped + splat_bytes + centroid_bytes, scale_vec.data(), scale_bytes);
 
 	immediate_submit([&](VkCommandBuffer cmd) {
 		VkBufferCopy copy_splats{ 0, 0, splat_bytes };
@@ -425,6 +437,9 @@ void VulkanEngine::init_splats() {
 
 		VkBufferCopy copy_centroids{ splat_bytes, 0, centroid_bytes };
 		vkCmdCopyBuffer(cmd, staging_buffer.buffer, splat_centroids.buffer, 1, &copy_centroids);
+
+		VkBufferCopy copy_scales{ splat_bytes + centroid_bytes, 0, scale_bytes};
+		vkCmdCopyBuffer(cmd, staging_buffer.buffer, splat_scales.buffer, 1, &copy_scales);
 		});
 
 	vkutil::destroy_buffer(_context, staging_buffer);
@@ -437,8 +452,9 @@ void VulkanEngine::init_splats() {
 	
 	depths.resize(scene.splats.size());
 
-	// radix stuff 
+}
 
+void VulkanEngine::init_radix() {
 	// Our splat data gets too big for the CPU_TO_GPU Heap 2 / host visible VRAM, so we use use regular VRAM and a staging buffer to upload
 	rdx_buffers[0] = vkutil::create_buffer(_context, sizeof(SplatDepth) * depths.size(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
 	_main_deletion_queue.push_function([=]() {
@@ -455,7 +471,7 @@ void VulkanEngine::init_splats() {
 		vkutil::destroy_buffer(_context, rdx_count_buffer);
 		});
 
-	visible_ele_buffer = vkutil::create_buffer(_context, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	visible_ele_buffer = vkutil::create_buffer(_context, sizeof(uint32_t), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
 	_main_deletion_queue.push_function([=]() {
 		vkutil::destroy_buffer(_context, visible_ele_buffer);
 		});
@@ -475,6 +491,28 @@ void VulkanEngine::init_splats() {
 	_main_deletion_queue.push_function([=]() {
 		vkutil::destroy_buffer(_context, indirect_dispatch_buffer);
 		});
+}
+
+void VulkanEngine::init_stats() {
+	frame_stats = {};
+	frame_stats.frame_number = 0;
+	GPUFrameStats last_GPU_frame_stats = {};
+	last_GPU_frame_stats.visible_splats = 0;
+	frame_stats.GPU_stats = last_GPU_frame_stats;
+
+
+	// two sections of buffer for last / current frame
+	stats_buffer = vkutil::create_buffer(_context, sizeof(GPUFrameStats) * FRAME_OVERLAP, VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+	_main_deletion_queue.push_function([=]() {
+		vkutil::destroy_buffer(_context, stats_buffer);
+		});
+
+	GPUFrameStats empty_stats_buffer_data[FRAME_OVERLAP];
+	for (unsigned int i = 0; i < FRAME_OVERLAP; i++) {
+		GPUFrameStats empty_stats = { 0 };
+		empty_stats_buffer_data[i] = empty_stats;
+	}
+	memcpy(stats_buffer.allocation->GetMappedData(), &empty_stats_buffer_data, sizeof(GPUFrameStats) * FRAME_OVERLAP);
 }
 
 void VulkanEngine::run()
@@ -512,10 +550,10 @@ void VulkanEngine::run()
 				if (e.type == SDL_MOUSEWHEEL) {
 					float scroll = e.wheel.y;
 
-					rad -= scroll * scroll_sensitivity;
+					scene.scroll_distance -= scroll * scene.scroll_sensitivity;
 
-					if (rad < 0.0001f) {
-						rad = 0.0001f;
+					if (scene.scroll_distance < 0.0001f) {
+						scene.scroll_distance = 0.0001f;
 					}
 				}
 			}
@@ -572,21 +610,31 @@ void VulkanEngine::run()
 			resize_draw_images();
 		}
 
+		read_stats();
+
 		// imgui new frame
 		ImGui_ImplVulkan_NewFrame();
 		ImGui_ImplSDL2_NewFrame();
 		ImGui::NewFrame();
 
-		if (ImGui::Begin("background")) {
-			ImGui::Text("Frame Time: %d", frame_time);
+		if (ImGui::Begin("Options")) {
 			ImGui::SliderFloat("Min Opacity", &min_opacity, 0.0001, 1.0);
-			ImGui::SliderFloat("Scroll Sensitivity", &scroll_sensitivity, 0.02, 1.0);
-			ImGui::SliderFloat("Near Clipping", &clipping_plane, 0.05, 50.0);
+			ImGui::SliderFloat("Scroll Sensitivity", &scene.scroll_sensitivity, 0.02, 3.0, NULL, ImGuiSliderFlags_Logarithmic);
+			ImGui::SliderFloat("Near Clipping", &scene.near_plane, 0.001, 50.0, NULL, ImGuiSliderFlags_Logarithmic);
 			ImGui::InputInt("Radix Sort Work Groups", &num_workgroups);
 			ImGui::ColorEdit3("Background Color", clear_color.float32, ImGuiColorEditFlags_NoInputs);
+			ImGui::End();
 		}
 
-		ImGui::End();
+		if (ImGui::Begin("Stats")) {
+			ImGui::Text("Frame Time: %d", frame_stats.frame_time);
+			ImGui::Text("Total Splats: %d", scene.splats.size());
+			ImGui::Text("Visible Splats:  %d", frame_stats.GPU_stats.visible_splats);
+			ImGui::Text("Visible %%:  %.3f", (frame_stats.GPU_stats.visible_splats / static_cast<float>(scene.splats.size())) * 100.0);
+			ImGui::End();
+		}
+
+		
 
 		ImGui::Render();
 
@@ -655,6 +703,7 @@ void VulkanEngine::draw() {
 	draw_geometry(cmd);
 	end_rendering(cmd);
 
+
 	draw_imgui(cmd, _draw_image.imageView);
 
 	// transition the draw image and the swapchain image into their correct transfer layouts
@@ -709,10 +758,10 @@ void VulkanEngine::draw() {
 	}
 
 	// increase the number of frames drawn
-	_frame_number++;
+	frame_stats.frame_number++;
 	// keep track of frame time
 	curr_time = std::chrono::steady_clock::now();
-	frame_time = std::chrono::duration_cast<std::chrono::milliseconds>(curr_time - prev_time).count();
+	frame_stats.frame_time = std::chrono::duration_cast<std::chrono::milliseconds>(curr_time - prev_time).count();
 	prev_time = curr_time;
 
 }
@@ -751,21 +800,24 @@ void VulkanEngine::start_rendering(VkCommandBuffer cmd) {
 
 void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
 	// compute this stuff early so we know what z to use
-	cam_pos_cartesian = glm::vec3{ rad * sin(phi) * cos(theta), rad * cos(phi), rad * sin(phi) * sin(theta) } + center;
-	view = glm::lookAt(cam_pos_cartesian, center, glm::vec3(0, 1, 0));
-	proj = glm::perspective(glm::radians(70.f), (float)_draw_extent.width / (float)_draw_extent.height, clipping_plane, 10000.f);
+	cam_pos_cartesian = glm::vec3{ scene.scroll_distance * sin(phi) * cos(theta), scene.scroll_distance * cos(phi), scene.scroll_distance * sin(phi) * sin(theta) } + scene.average_centroid;
+	view = glm::lookAt(cam_pos_cartesian, scene.average_centroid, glm::vec3(0, 1, 0));
+	proj = glm::perspective(glm::radians(70.f), (float)_draw_extent.width / (float)_draw_extent.height, 10000.f, scene.near_plane);
+	proj[1][1] *= -1;
+
 
 	VkDescriptorSet depths_descriptor = get_current_frame()._frame_descriptors.allocate(_context.device, _compute_rdx_depths_descriptor_layout);
 	{
 		DescriptorWriter writer;
 		writer.write_buffer(0, splat_centroids.buffer, sizeof(glm::vec4) * scene.splats.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // centroid data
-		writer.write_buffer(1, rdx_buffers[0].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // rdx_buffers[0]
-		writer.write_buffer(2, visible_ele_buffer.buffer, sizeof(uint32_t), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // visible elements
-		writer.write_buffer(3, indirect_draw_buffer.buffer, sizeof(VkDrawIndirectCommand), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // indirect draw
+		writer.write_buffer(1, splat_scales.buffer, sizeof(glm::vec4) * scene.splats.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // scale data
+		writer.write_buffer(2, rdx_buffers[0].buffer, sizeof(SplatDepth) * depths.size(), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // rdx_buffers[0]
+		writer.write_buffer(3, visible_ele_buffer.buffer, sizeof(uint32_t), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // visible elements
+		writer.write_buffer(4, indirect_draw_buffer.buffer, sizeof(VkDrawIndirectCommand), 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER); // indirect draw
 		writer.update_set(_context.device, depths_descriptor);
 	}
 
-	RadixDepthsPC depth_pc = {view, proj, clipping_plane};
+	RadixDepthsPC depth_pc = {view, proj, scene.near_plane};
 
 	uint32_t WORKGROUP_SIZE = 256;
 	uint32_t num_elements = static_cast<uint32_t>(depths.size());
@@ -794,7 +846,7 @@ void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
 		writer.update_set(_context.device, radix_descriptor_odd);
 	}
 
-	immediate_submit([&](VkCommandBuffer imm_cmd) {// immediate submit probably not optimal
+	immediate_submit([&](VkCommandBuffer imm_cmd) {// TODO: replace immediate submit with regular command buffer
 
 		vkCmdFillBuffer(imm_cmd, visible_ele_buffer.buffer, 0, sizeof(uint32_t), 0);
 
@@ -878,6 +930,15 @@ void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
 
 			final_rdx_buffer_idx = (pass % 2 == 0) ? 1 : 0;
 		}
+
+		// radix stats
+		VkBufferCopy copy_visible_ele = {};
+		copy_visible_ele.size = sizeof(uint32_t);
+		copy_visible_ele.srcOffset = 0;
+		copy_visible_ele.dstOffset = frame_stats.frame_number % FRAME_OVERLAP * sizeof(uint32_t);
+
+		vkCmdCopyBuffer(imm_cmd, visible_ele_buffer.buffer, stats_buffer.buffer, 1, &copy_visible_ele);// might have to change vma alloc of visible_ele_buffer
+
 		});
 }
 
@@ -908,7 +969,6 @@ void VulkanEngine::dispatch_rdx_depths(VkDescriptorSet depths_descriptor, VkComm
 void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 	float focalX = std::abs(proj[0][0]) * (screen_width * 0.5f);
 	float focalY = std::abs(proj[1][1]) * (screen_height * 0.5f);
-	proj[1][1] *= -1;
 
 	AllocatedBuffer uniform_buffer = get_current_frame()._GPU_scene_data_buffer;
 	GPUSceneData* scene_uniform_data = (GPUSceneData*)uniform_buffer.allocation->GetMappedData();
@@ -951,6 +1011,12 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 
 void VulkanEngine::end_rendering(VkCommandBuffer cmd) {
 	vkCmdEndRendering(cmd);
+}
+
+void VulkanEngine::read_stats() {
+	uint8_t* stats_data_pointer = static_cast<uint8_t*>(stats_buffer.info.pMappedData);
+	stats_data_pointer += sizeof(GPUFrameStats) * ((frame_stats.frame_number + 1) % FRAME_OVERLAP);
+	memcpy(&frame_stats.GPU_stats.visible_splats, stats_data_pointer, sizeof(GPUFrameStats));
 }
 
 void VulkanEngine::draw_imgui(VkCommandBuffer cmd, VkImageView targetImageView)

@@ -17,19 +17,6 @@
 
 constexpr unsigned int FRAME_OVERLAP = 2;
 
-struct SplatDepth { uint32_t index; float z; };
-struct RadixSortPC {
-	uint32_t num_elements;
-	uint32_t shift;              // pass * 8
-	uint32_t num_workgroups;
-	uint32_t num_blocks_per_workgroup;
-};
-
-struct RadixDepthsPC {
-	glm::mat4 view;
-	glm::mat4 proj;
-	float near_plane;
-};
 struct FrameData {
 	VkSemaphore _swapchain_semaphore;
 	VkFence _render_fence;
@@ -43,12 +30,22 @@ struct FrameData {
 	AllocatedBuffer _GPU_scene_data_buffer;
 };
 
+struct GPUFrameStats {
+	uint32_t visible_splats;
+};
 
-class VulkanEngine {
+struct FrameStats {
+	GPUFrameStats GPU_stats;
+	int frame_number;
+	int frame_time;
+};
+
+
+class VulkanEngine { // TODO: unify naming conventions
 public:
 
 	bool _is_initialized{ false };
-	int _frame_number{ 0 };
+	FrameStats frame_stats = {};
 
 	//initializes everything in the engine
 	void init();
@@ -68,7 +65,7 @@ public:
 
 	FrameData _frames[FRAME_OVERLAP];
 
-	FrameData& get_current_frame() { return _frames[_frame_number % FRAME_OVERLAP]; };
+	FrameData& get_current_frame() { return _frames[frame_stats.frame_number % FRAME_OVERLAP]; };
 
 	VkQueue _graphics_queue;
 	uint32_t _graphics_queue_family;
@@ -110,10 +107,8 @@ public:
 
 	VkClearColorValue clear_color;
 
-	float rad = 0.23f;
 	float phi = 1.45f;
 	float theta = 0.0f;
-	glm::vec3 center = { 0.0, 0.04, 0.0 };
 
 	bool first_mouse = true;
 	int last_mouse_x = 0;
@@ -122,11 +117,8 @@ public:
 
 	std::chrono::steady_clock::time_point prev_time = std::chrono::steady_clock::now();;
 	std::chrono::steady_clock::time_point curr_time;
-	int frame_time = 0;
 
 	float min_opacity = 0.001;
-	float scroll_sensitivity = 0.02;
-	float clipping_plane = 0.05;
 	int num_workgroups = 64;
 
 	VkDescriptorSet splat_set;
@@ -135,6 +127,7 @@ public:
 
 	AllocatedBuffer splat_buffer;
 	AllocatedBuffer splat_centroids;
+	AllocatedBuffer splat_scales;
 	
 	AllocatedBuffer indirect_draw_buffer;
 	AllocatedBuffer indirect_dispatch_buffer;
@@ -143,11 +136,15 @@ public:
 	AllocatedBuffer rdx_count_buffer;
 	AllocatedBuffer visible_ele_buffer;
 
+	AllocatedBuffer stats_buffer;
+
 	glm::mat4 view;
 	glm::mat4 proj;
 	glm::vec3 cam_pos_cartesian;
 	std::vector<SplatDepth> depths;
+
 	int final_rdx_buffer_idx = 0;
+	int stats_buffer_idx = 0;
 
 
 private:
@@ -181,6 +178,10 @@ private:
 
 	void init_splats();
 
+	void init_radix();
+
+	void init_stats();
+
 	void immediate_submit(std::function<void(VkCommandBuffer cmd)>&& function);
 
 	void resize_draw_images();
@@ -190,4 +191,6 @@ private:
 	void dispatch_rdx_scan_scat(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixSortPC pc);
 
 	void dispatch_rdx_depths(VkDescriptorSet radix_descriptor, VkCommandBuffer imm_cmd, RadixDepthsPC pc, int dispatch_size);
+
+	void read_stats();
 };
