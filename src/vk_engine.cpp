@@ -844,7 +844,7 @@ void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
 	vkCmdFillBuffer(cmd, visible_ele_buffer.buffer, 0, sizeof(uint32_t), 0);
 
 	{
-		VkMemoryBarrier2 barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // make sure visible_ele_count is zeroed before depths shader accumulates into it
+		VkMemoryBarrier2 barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };// initialize visible_ele_buffer before depth dispatch
 		barrier.srcStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
 		barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
 		barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
@@ -859,11 +859,11 @@ void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
 	dispatch_rdx_depths(depths_descriptor, cmd, depth_pc, (scene.splats.size() + 256 - 1) / 256);
 
 	{
-		VkMemoryBarrier2 barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // make sure we dont start sorting until depths is filled
+		VkMemoryBarrier2 barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // dispatch depth before copying one of its buffers
 		barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-		barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-		barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-		barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+		barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+		barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+		barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
 
 		VkDependencyInfo dep{ .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
 		dep.memoryBarrierCount = 1;
@@ -878,9 +878,9 @@ void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
 	vkCmdCopyBuffer(cmd, visible_ele_buffer.buffer, indirect_draw_buffer.buffer, 1, &copy_indirect_info);
 
 	{
-		VkMemoryBarrier2 barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // make sure we dont start sorting until depths is filled
+		VkMemoryBarrier2 barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // copy in visible ele buffer before next compute dispatch
 		barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
-		barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+		barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
 		barrier.dstStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
 		barrier.dstAccessMask = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
 
@@ -932,7 +932,7 @@ void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
 			barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
 			barrier.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
 			barrier.dstStageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-			barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT;
+			barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
 
 			VkDependencyInfo dep = { .sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
 			dep.memoryBarrierCount = 1;
