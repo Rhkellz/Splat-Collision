@@ -106,6 +106,7 @@ struct GPUDrawPushConstants {
 	float focal_x;
 	float focal_y;
 	float min_opacty;
+	float near_plane;
 };
 
 

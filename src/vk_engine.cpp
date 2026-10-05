@@ -857,7 +857,6 @@ void VulkanEngine::sort_splats(VkCommandBuffer cmd) {
 	}
 
 	dispatch_rdx_depths(depths_descriptor, cmd, depth_pc, (scene.splats.size() + 256 - 1) / 256);
-
 	{
 		VkMemoryBarrier2 barrier{ .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 }; // dispatch depth before copying one of its buffers
 		barrier.srcStageMask = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
@@ -1015,6 +1014,7 @@ void VulkanEngine::draw_geometry(VkCommandBuffer cmd) {
 	push_constants.focal_x = focalX;
 	push_constants.focal_y = focalY;
 	push_constants.min_opacty = min_opacity;
+	push_constants.near_plane = scene.near_plane;
 	vkCmdPushConstants(cmd, _splat_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(GPUDrawPushConstants), &push_constants);
 
 	vkCmdDrawIndirect(cmd, indirect_draw_buffer.buffer, 0, 1, 0);

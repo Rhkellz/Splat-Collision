@@ -62,7 +62,7 @@ mat3 reconstruct_cov(float scale[3], float rot[4]) {
 mat3 computeJacobian(vec3 view_space_pos, float focal_x, float focal_y) {
     float x = view_space_pos.x;
     float y = view_space_pos.y;
-    float z = view_space_pos.z;
+    float z = min(view_space_pos.z, -1.0 * PushConstants.near_plane);
     float inv_z = 1.0 / z;
     float inv_z2 = inv_z * inv_z;
 

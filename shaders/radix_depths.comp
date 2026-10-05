@@ -47,25 +47,25 @@ void main() {
 
     if (i < centroids.length()) {
 
-    mat4 V_P = proj * view; 
-    vec4 p_clip = V_P * centroids[i];
+        mat4 V_P = proj * view; 
+        vec4 p_clip = V_P * centroids[i];
 
-    float max_scale = max(scales[i].x, max(scales[i].y, scales[i].z));
-    float splat_extent = max_scale * 4.5;
+        float max_scale = max(scales[i].x, max(scales[i].y, scales[i].z));
+        float splat_extent = max_scale * 4.5;
 
-    float pad_x = splat_extent * abs(proj[0][0]);
-    float pad_y = splat_extent * abs(proj[1][1]);
+        float pad_x = splat_extent * abs(proj[0][0]);
+        float pad_y = splat_extent * abs(proj[1][1]);
 
-    if (p_clip.w + splat_extent > near_plane &&
-        abs(p_clip.x) <= p_clip.w + pad_x &&
-        abs(p_clip.y) <= p_clip.w + pad_y) {
+        if (p_clip.w + splat_extent > near_plane &&
+            abs(p_clip.x) <= p_clip.w + pad_x &&
+            abs(p_clip.y) <= p_clip.w + pad_y) {
     
-        is_visible = true;
-        local_idx = atomicAdd(visible_shared, 1);
-        z = p_clip.w;
-    }
+            is_visible = true;
+            local_idx = atomicAdd(visible_shared, 1);
+            z = p_clip.w;
+        }
 
-}
+    }
     barrier();
 
   
@@ -80,5 +80,6 @@ void main() {
         g_elements_in[packed_global_idx].index = i;
         g_elements_in[packed_global_idx].z = z;
     }
+
 
 }
